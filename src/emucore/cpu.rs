@@ -574,7 +574,7 @@ impl<M: MemoryIfc> Cpu<M> {
         let reg_index = if opcode >> 6 == 0x02 {
             opcode & 0x07
         } else {
-            0x08
+            8
         };
 
         if reg_index == 6 {
@@ -584,7 +584,7 @@ impl<M: MemoryIfc> Cpu<M> {
             }
             assert!(mcycle == 2);
         }
-        if reg_index == 8 {
+        else if reg_index == 8 {
             if mcycle == 1 {
                 self.temp8 = self.read_inc_pc();
                 return;
@@ -1119,6 +1119,52 @@ mod tests {
 
     #[test]
     fn alu_test() {
+        // test that registers are handled properly
+        for i in 0..8 {
+            for op in 0..8 {
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(match op {
+                        0 | 1 => std::ops::Add::add,
+                        2 => std::ops::Sub::sub,
+                        3 => |a: u8, b:u8| a.wrapping_sub(b).wrapping_sub(1),
+                        4 => std::ops::BitAnd::bitand,
+                        5 => std::ops::BitXor::bitxor,
+                        6 => std::ops::BitOr::bitor,
+                        7 => |a: u8, _| a,
+                        _ => panic!()
+                    }(if i != 7 { 0x42 } else { 0x2B }, 0x2B));
+                    state.reg.set_f(match op {
+                        0 | 1 => if i == 7 { 0x20 } else { 0x00 },
+                        2 => if i == 7 { 0xF0 } else { 0x50 },
+                        3 => if i == 7 { 0x40 } else { 0x50 },
+                        4 => 0x20,
+                        5 => if i == 7 { 0x80 } else { 0x00 },
+                        6 => 0x00,
+                        7 => if i == 7 { 0xF0 } else { 0x50 },
+                        _ => panic!()
+                    });
+                    let prep_instr = 0x06 | i << 3;
+                    let alu_instr = 0x80 | op << 3 | i;
+                    if i != 6 {
+                        if i != 7 {
+                            state.reg.r8_write(i, 0x2B);
+                        }
+                        // LD A 0x42
+                        // LD r 0x2B
+                        // alu A r
+                        register_test(&[0x3E, 0x42, prep_instr, 0x2B, alu_instr, 0x76], state);
+                    } else {
+                        state.reg.hl = 0xFFFF;
+                        // LD A 0x42
+                        // DEC HL
+                        // LD (HL) 0x2B
+                        // alu A (HL)
+                        register_test(&[0x3E, 0x42, 0x2B, prep_instr, 0x2B, alu_instr, 0x76], state);
+                    }
+                }
+            }
+        }
 
     }
 }
