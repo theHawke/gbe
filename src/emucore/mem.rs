@@ -1,14 +1,21 @@
-pub struct MemoryController<'a> {
+
+pub trait MemoryIfc {
+    fn read(&self, addr: u16) -> u8;
+    fn write(&mut self, addr: u16, val: u8);
+}
+
+
+pub struct GBMemory {
     wram: Box<[u8; 8192]>,
     vram: Box<[u8; 8192]>,
     oam: Box<[u8; 160]>,
-    cartridge: Box<Cartridge<'a>>,
+    cartridge: Cartridge,
     control_registers: ControlRegisters
 }
 
-impl<'a> MemoryController<'a> {
-    pub fn new(cartridge: Box<Cartridge>) -> MemoryController {
-        MemoryController {
+impl GBMemory {
+    pub fn new(cartridge: Cartridge) -> GBMemory {
+        GBMemory {
             wram: Box::new([0; 8192]),
             vram: Box::new([0; 8192]),
             oam: Box::new([0; 160]),
@@ -16,8 +23,10 @@ impl<'a> MemoryController<'a> {
             control_registers: ControlRegisters::new()
         }
     }
+}
 
-    pub fn read(&self, addr: u16) -> u8 {
+impl MemoryIfc for GBMemory {
+    fn read(&self, addr: u16) -> u8 {
         if addr < 0x8000 {
             self.cartridge.read_rom(addr)
         }
@@ -41,7 +50,7 @@ impl<'a> MemoryController<'a> {
         }
     }
 
-    pub fn write(&mut self, addr: u16, val: u8) {
+    fn write(&mut self, addr: u16, val: u8) {
         if addr < 0x8000 {
             self.cartridge.write_rom(addr, val)
         }
@@ -66,15 +75,15 @@ impl<'a> MemoryController<'a> {
     }
 }
 
-pub struct Cartridge<'a> {
-    rom: &'a [u8],
+pub struct Cartridge {
+    rom: Vec<u8>,
     ram: Vec<u8>,
 }
 
-impl<'a> Cartridge<'a> {
+impl Cartridge {
     pub fn new(rom: &[u8]) -> Cartridge {
         Cartridge {
-            rom,
+            rom: Vec::from(rom),
             ram: Vec::new(),
         }
     }
@@ -88,7 +97,7 @@ impl<'a> Cartridge<'a> {
         }
     }
 
-    fn write_rom(&mut self, addr: u16, val: u8) {
+    fn write_rom(&mut self, _addr: u16, _val: u8) {
         // memory bank controllers use rom writes for bank select
     }
 
@@ -125,11 +134,11 @@ impl ControlRegisters {
         }
     }
 
-    fn read_cr(&self, addr: u16) -> u8 {
+    fn read_cr(&self, _addr: u16) -> u8 {
         0
     }
 
-    fn write_cr(&mut self, addr: u16, val: u8) {
+    fn write_cr(&mut self, _addr: u16, _val: u8) {
 
     }
 }

@@ -1,42 +1,15 @@
-use super::mem::MemoryController;
+use super::mem::MemoryIfc;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub struct Cpu<'a> {
+pub struct Cpu<M: MemoryIfc> {
     state: CpuState,
-    mem: Rc<RefCell<MemoryController<'a>>>,
+    mem: Rc<RefCell<M>>,
     opcode: Opcode,
-    dispatch: InstructionFn<'a>,
+    dispatch: InstructionFn<M>,
     mcycle: MCycle,
     temp8: u8,
     temp16: u16,
-}
-
-impl<'a> Cpu<'a> {
-    pub fn new(mem: Rc<RefCell<MemoryController>>) -> Cpu {
-        Cpu {
-            state: CpuState::new(),
-            opcode: 0,
-            dispatch: Cpu::nop,
-            mcycle: 1,
-            temp8: 0,
-            temp16: 0,
-            mem,
-        }
-    }
-    pub fn tick(&mut self) -> () {
-        match self.state.state {
-            State::Running => {
-                (self.dispatch)(self, self.opcode, self.mcycle);
-                self.mcycle += 1;
-            }
-            State::Halt => {}
-            State::Stop => {}
-            State::Error => {}
-        }
-
-        self.state.display();
-    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -59,18 +32,18 @@ impl CpuState {
         println!("Registers:");
         let b = self.reg.b();
         let c = self.reg.c();
-        println!("B: {:#x} C: {:#x} BC: {:#x}", b, c, self.reg.bc);
+        println!("B: {:x} C: {:x} BC: {:x}", b, c, self.reg.bc);
         let d = self.reg.d();
         let e = self.reg.e();
-        println!("D: {:#x} E: {:#x} DE: {:#x}", d, e, self.reg.de);
+        println!("D: {:x} E: {:x} DE: {:x}", d, e, self.reg.de);
         let h = self.reg.h();
         let l = self.reg.l();
-        println!("H: {:#x} L: {:#x} HL: {:#x}", h, l, self.reg.hl);
+        println!("H: {:x} L: {:x} HL: {:x}", h, l, self.reg.hl);
         let a = self.reg.a();
         let f = self.reg.f();
-        println!("A: {:#x} F: {:#x} AF: {:#x}", a, f, self.reg.af);
-        println!("SP: {:#x}", self.reg.sp);
-        println!("PC: {:#x}", self.reg.pc);
+        println!("A: {:x} F: {:x} AF: {:x}", a, f, self.reg.af);
+        println!("SP: {:x}", self.reg.sp);
+        println!("PC: {:x}", self.reg.pc);
         println!("IME: {}", self.ime);
         println!("");
     }
@@ -159,8 +132,8 @@ impl RegisterFile {
         self.af as u8 & 0x0F
     }
     fn set_f(&mut self, val: u8) {
-        self.bc &= 0xFF00;
-        self.bc |= (val & 0xF0) as u16;
+        self.af &= 0xFF00;
+        self.af |= (val & 0xF0) as u16;
     }
     fn update_flags(&mut self, set: u8, reset: u8, new: u8, mask: u8) {
         // mask selects values from new to be applied
@@ -181,17 +154,98 @@ impl RegisterFile {
     fn cf(&self) -> bool {
         (self.af & 0x10) != 0
     }
+    fn r8_read(&self, idx: u8) -> u8 {
+        // idx == 6 is invalid, usually used by (HL) memory indirection
+        match idx {
+            0 => self.b(),
+            1 => self.c(),
+            2 => self.d(),
+            3 => self.e(),
+            4 => self.h(),
+            5 => self.l(),
+            7 => self.a(),
+            _ => panic!("r8_read only valid for idx 0-5,7"),
+        }
+    }
+    fn r8_write(&mut self, idx: u8, val: u8) {
+        // idx == 6 is invalid, usually used by (HL) memory indirection
+        match idx {
+            0 => self.set_b(val),
+            1 => self.set_c(val),
+            2 => self.set_d(val),
+            3 => self.set_e(val),
+            4 => self.set_h(val),
+            5 => self.set_l(val),
+            7 => self.set_a(val),
+            _ => panic!("r8_write only valid for idx 0-5,7"),
+        }
+    }
+    fn r16_read(&self, idx: u8) -> u16 {
+        match idx {
+            0 => self.bc,
+            1 => self.de,
+            2 => self.hl,
+            3 => self.sp,
+            _ => panic!("r16_read only valid for idx 0-3"),
+        }
+    }
+    fn r16_write(&mut self, idx: u8, val: u16) {
+        match idx {
+            0 => {
+                self.bc = val;
+            }
+            1 => {
+                self.de = val;
+            }
+            2 => {
+                self.hl = val;
+            }
+            3 => {
+                self.sp = val;
+            }
+            _ => {
+                panic!("r16_write only valid for idx 0-3");
+            }
+        }
+    }
 }
 
 type Opcode = u8;
+type InstructionFn<M> = fn(&mut Cpu<M>, Opcode, MCycle) -> ();
 type MCycle = u8;
-type InstructionFn<'a> = fn(&mut Cpu<'a>, Opcode, MCycle) -> ();
 
-// Implementation of instruction dispatch
-impl<'a> Cpu<'a> {
+impl<M: MemoryIfc> Cpu<M> {
+    pub fn new(mem: Rc<RefCell<M>>) -> Cpu<M> {
+        Cpu {
+            state: CpuState::new(),
+            opcode: 0,
+            dispatch: Cpu::nop,
+            mcycle: 1,
+            temp8: 0,
+            temp16: 0,
+            mem,
+        }
+    }
+
+    pub fn tick(&mut self) -> () {
+        match self.state.state {
+            State::Running => {
+                (self.dispatch)(self, self.opcode, self.mcycle);
+                self.mcycle += 1;
+            }
+            State::Halt => {}
+            State::Stop => {}
+            State::Error => {}
+        }
+
+        self.state.display();
+    }
+
     //
+    // Implementation of instruction dispatch
+    //
+
     // Helper routines
-    //
 
     fn mem_read(&mut self, addr: u16) -> u8 {
         self.mem.borrow().read(addr)
@@ -202,77 +256,35 @@ impl<'a> Cpu<'a> {
     }
 
     fn reg_8_read(&self, idx: u8) -> u8 {
-        // idx == 6 is invalid, usually used by (HL) memory indirection
-        match idx {
-            0 => self.state.reg.b(),
-            1 => self.state.reg.c(),
-            2 => self.state.reg.d(),
-            3 => self.state.reg.e(),
-            4 => self.state.reg.h(),
-            5 => self.state.reg.l(),
-            7 => self.state.reg.a(),
-            _ => panic!(),
-        }
+        self.state.reg.r8_read(idx)
     }
 
     fn reg_8_write(&mut self, idx: u8, val: u8) {
-        // idx == 6 is invalid, usually used by (HL) memory indirection
-        match idx {
-            0 => self.state.reg.set_b(val),
-            1 => self.state.reg.set_c(val),
-            2 => self.state.reg.set_d(val),
-            3 => self.state.reg.set_e(val),
-            4 => self.state.reg.set_h(val),
-            5 => self.state.reg.set_l(val),
-            7 => self.state.reg.set_a(val),
-            _ => panic!(),
-        }
+        self.state.reg.r8_write(idx, val);
     }
 
     fn reg_16_read(&self, idx: u8) -> u16 {
-        match idx {
-            0 => self.state.reg.bc,
-            1 => self.state.reg.de,
-            2 => self.state.reg.hl,
-            3 => self.state.reg.sp,
-            _ => panic!(),
-        }
+        self.state.reg.r16_read(idx)
     }
 
     fn reg_16_write(&mut self, idx: u8, val: u16) {
-        match idx {
-            0 => {
-                self.state.reg.bc = val;
-            }
-            1 => {
-                self.state.reg.de = val;
-            }
-            2 => {
-                self.state.reg.hl = val;
-            }
-            3 => {
-                self.state.reg.sp = val;
-            }
-            _ => {
-                panic!();
-            }
-        }
+        self.state.reg.r16_write(idx, val);
     }
 
     fn add_sub(op1: u8, mut op2: u8, sub: bool, use_carry: bool, carry_in: bool) -> (u8, u8) {
         let mut flags_out = 0;
 
-        if use_carry && carry_in {
-            op2 += 1;
+        if use_carry && (carry_in ^ sub) {
+            op2 = op2.wrapping_add(1);
         }
 
         if sub {
-            op2 = 0 - op2;
+            op2 = 0u8.wrapping_sub(op2);
             // negative/subtract flag
             flags_out |= 0x40;
         }
 
-        let ret = op1 + op2;
+        let ret = op1.wrapping_add(op2);
 
         if ret == 0 {
             // zero flag
@@ -470,7 +482,7 @@ impl<'a> Cpu<'a> {
         if reg_index != 6 {
             assert!(mcycle == 1);
 
-            let (val, flags) = Cpu::add_sub(
+            let (val, flags) = Self::add_sub(
                 self.reg_8_read(reg_index),
                 1,
                 dec,
@@ -490,7 +502,7 @@ impl<'a> Cpu<'a> {
             // reg_index == 6
             match mcycle {
                 1 => {
-                    let (val, flags) = Cpu::add_sub(
+                    let (val, flags) = Self::add_sub(
                         self.mem_read(self.state.reg.hl),
                         1,
                         dec,
@@ -526,21 +538,19 @@ impl<'a> Cpu<'a> {
         // M-cycles: 2
         // Flags: - - - -
 
-        let dec = (opcode & 0x08) == 0;
+        let dec = (opcode & 0x08) != 0;
         let reg_index = (opcode >> 4) & 0x03;
 
         match mcycle {
             1 => {
                 self.temp8 = self.state.reg.f();
                 self.temp16 = self.reg_16_read(reg_index);
-                let (val, flags) =
-                    Cpu::add_sub(self.temp16 as u8, 1, dec, false, self.state.reg.cf());
+                let (val, flags) = Self::add_sub(self.temp16 as u8, 1, dec, false, self.state.reg.cf());
                 self.temp16 = (self.temp16 & 0xFF00) | val as u16;
                 self.state.reg.set_f(flags);
             }
             2 => {
-                let (val, _) =
-                    Cpu::add_sub((self.temp16 >> 8) as u8, 0, dec, true, self.state.reg.cf());
+                let (val, _) = Self::add_sub((self.temp16 >> 8) as u8, 0, dec, true, self.state.reg.cf());
                 self.reg_16_write(reg_index, self.temp16 & 0x00FF | (val as u16) << 8);
                 self.state.reg.set_f(self.temp8);
 
@@ -590,25 +600,25 @@ impl<'a> Cpu<'a> {
         match op {
             0 => {
                 // ADD
-                let (val, flags) = Cpu::add_sub(a, self.temp8, false, false, carry_in);
+                let (val, flags) = Self::add_sub(a, self.temp8, false, false, carry_in);
                 self.state.reg.set_a(val);
                 self.state.reg.update_flags(0, 0, flags, 0xF0);
             }
             1 => {
                 // ADC
-                let (val, flags) = Cpu::add_sub(a, self.temp8, false, true, carry_in);
+                let (val, flags) = Self::add_sub(a, self.temp8, false, true, carry_in);
                 self.state.reg.set_a(val);
                 self.state.reg.update_flags(0, 0, flags, 0xF0);
             }
             2 => {
                 // SUB
-                let (val, flags) = Cpu::add_sub(a, self.temp8, true, false, carry_in);
+                let (val, flags) = Self::add_sub(a, self.temp8, true, false, carry_in);
                 self.state.reg.set_a(val);
                 self.state.reg.update_flags(0, 0, flags, 0xF0);
             }
             3 => {
                 // SBC
-                let (val, flags) = Cpu::add_sub(a, self.temp8, true, true, carry_in);
+                let (val, flags) = Self::add_sub(a, self.temp8, true, true, carry_in);
                 self.state.reg.set_a(val);
                 self.state.reg.update_flags(0, 0, flags, 0xF0);
             }
@@ -638,7 +648,7 @@ impl<'a> Cpu<'a> {
             }
             7 => {
                 // CP
-                let (_val, flags) = Cpu::add_sub(a, self.temp8, true, false, carry_in);
+                let (_val, flags) = Self::add_sub(a, self.temp8, true, false, carry_in);
                 self.state.reg.update_flags(0, 0, flags, 0xF0);
             }
             _ => {
@@ -664,7 +674,7 @@ impl<'a> Cpu<'a> {
 
 
     #[cfg_attr(rustfmt, rustfmt_skip)]
-    const OPCODE_DISPATCH: [InstructionFn<'a>; 256] = [
+    const OPCODE_DISPATCH: [InstructionFn<M>; 256] = [
         Cpu::nop,     Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
         Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
         Cpu::stop,    Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
@@ -700,7 +710,7 @@ impl<'a> Cpu<'a> {
     ];
     
     #[cfg_attr(rustfmt, rustfmt_skip)]
-    const OPCODE_DISPATCH_PREFIX: [InstructionFn<'a>; 256] = [
+    const OPCODE_DISPATCH_PREFIX: [InstructionFn<M>; 256] = [
         Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
         Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
         Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
@@ -739,11 +749,36 @@ impl<'a> Cpu<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::mem::*;
+
+    use std::collections::HashMap;
+    
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    struct SparseMem (HashMap<u16, u8>);
+
+    fn with_address(instr: &[u8]) -> impl Iterator<Item = (u16, u8)> + '_ {
+        (0..).zip(instr.iter().copied())
+    }
+
+    impl<I> From<I> for SparseMem
+        where I : IntoIterator<Item=(u16, u8)>
+    {
+        fn from(iter: I) -> SparseMem {
+            SparseMem(HashMap::from_iter(iter))
+        }
+    }
+
+    impl MemoryIfc for SparseMem {
+        fn read(&self, addr: u16) -> u8 {
+            *self.0.get(&addr).unwrap_or(&0)
+        }
+
+        fn write(&mut self, addr: u16, val: u8) {
+            self.0.insert(addr, val);
+        }
+    }
 
     fn register_test(instr: &[u8], mut expected_state: CpuState) {
-        let cart = Box::new(Cartridge::new(instr));
-        let mem = Rc::new(RefCell::new(MemoryController::new(cart)));
+        let mem = Rc::new(RefCell::new(SparseMem::from(with_address(instr))));
         let mut cpu = Cpu::new(mem);
 
         while cpu.state.state == State::Running {
@@ -760,16 +795,25 @@ mod tests {
         assert_eq!(cpu.state, expected_state);
     }
 
+    fn memory_test(instr: &[u8], mut expected: SparseMem) {
+        let mem = Rc::new(RefCell::new(SparseMem::from(with_address(instr))));
+        let mut cpu = Cpu::new(mem.clone());
+
+        while cpu.state.state == State::Running {
+            cpu.tick();
+        }
+
+        expected.0.extend(with_address(instr));
+
+        assert_eq!(expected, *mem.borrow());
+    }
+
     #[test]
     fn load_immediate_test() {
         {
             let mut state = CpuState::new();
-            state.reg.set_a(0xAA);
-            register_test(&[0x3E, 0xAA, 0x76], state);
-        }
-        {
-            let mut state = CpuState::new();
             state.reg.set_b(0xAA);
+            // LD B 0xAA
             register_test(&[0x06, 0xAA, 0x76], state);
         }
         {
@@ -797,5 +841,284 @@ mod tests {
             state.reg.set_l(0xAA);
             register_test(&[0x2E, 0xAA, 0x76], state);
         }
+        {
+            let mem = SparseMem(HashMap::from([(0xFFFF, 0xAA)]));
+            // DEC HL
+            // LD (HL) 0xAA
+            memory_test(&[0x2B, 0x36, 0xAA, 0x76], mem);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0xAA);
+            register_test(&[0x3E, 0xAA, 0x76], state);
+        }
+    }
+
+    #[test]
+    fn inc_dec_8_test() {
+        {
+            let mut state = CpuState::new();
+            state.reg.set_b(0x01);
+            // INC B
+            register_test(&[0x04, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_b(0xFF);
+            state.reg.set_f(0x40);
+            // DEC B
+            register_test(&[0x05, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            // LD B 0xFF
+            // INC B
+            register_test(&[0x06, 0xFF, 0x04, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            // LD B 0x01
+            // DEC B
+            register_test(&[0x06, 0x01, 0x05, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_c(0x01);
+            register_test(&[0x0C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_c(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x0D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x0E, 0xFF, 0x0C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x0E, 0x01, 0x0D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_d(0x01);
+            register_test(&[0x14, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_d(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x15, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x16, 0xFF, 0x14, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x16, 0x01, 0x15, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_e(0x01);
+            register_test(&[0x1C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_e(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x1D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x1E, 0xFF, 0x1C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x1E, 0x01, 0x1D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_h(0x01);
+            register_test(&[0x24, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_h(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x25, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x26, 0xFF, 0x24, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x26, 0x01, 0x25, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_l(0x01);
+            register_test(&[0x2C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_l(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x2D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x2E, 0xFF, 0x2C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x2E, 0x01, 0x2D, 0x76], state);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xFFFF, 0x01), (0xFFFE, 0xFF), (0xFFFD, 0), (0xFFFC, 0)]));
+            // DEC HL
+            // INC (HL)
+            //
+            // DEC HL
+            // DEC (HL)
+            //
+            // DEC HL
+            // LD (HL) 0xFF
+            // INC (HL)
+            //
+            // DEC HL
+            // LD (HL) 0x01
+            // DEC (HL)
+            memory_test(&[0x2B, 0x34, 0x2B, 0x35, 0x2B, 0x36, 0xFF, 0x34, 0x2B, 0x36, 0x01, 0x35, 0x76], mem);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0x01);
+            register_test(&[0x3C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0xFF);
+            state.reg.set_f(0x40);
+            register_test(&[0x3D, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xA0);
+            register_test(&[0x3E, 0xFF, 0x3C, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0xE0);
+            register_test(&[0x3E, 0x01, 0x3D, 0x76], state);
+        }
+    }
+
+    #[test]
+    fn inc_dec_16_test() {
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0x0001;
+            // INC BC
+            register_test(&[0x03, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xFFFF;
+            // DEC BC
+            register_test(&[0x0B, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.de = 0x0001;
+            // INC DE
+            register_test(&[0x13, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.de = 0xFFFF;
+            // DEC DE
+            register_test(&[0x1B, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0x0001;
+            // INC HL
+            register_test(&[0x23, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xFFFF;
+            // DEC HL
+            register_test(&[0x2B, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0x0001;
+            // INC SP
+            register_test(&[0x33, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xFFFF;
+            // DEC SP
+            register_test(&[0x3B, 0x76], state);
+        }
+    }
+
+    #[test]
+    fn load_register_test() {
+        for i in 0..8 {
+            if i == 6 { continue; }
+            for j in 0..8 {
+                if j == 6 { continue; }
+                let mut state = CpuState::new();
+                state.reg.r8_write(i, 0xAA);
+                state.reg.r8_write(j, 0xAA);
+                let prep_instr = 0x06 | i << 3;
+                let load_instr = 0x40 | j << 3 | i;
+                // LD r1 0xAA
+                // LD r2 r1
+                register_test(&[prep_instr, 0xAA, load_instr, 0x76], state);
+            }
+            {
+                let mut state = CpuState::new();
+                state.reg.r8_write(i, 0xAA);
+                state.reg.set_f(0x80);
+                let load_instr = 0x40 | i << 3 | 6;
+                // 0xAA (XOR D) => dummy instruction / payload for LD r (HL)
+                // LD r (HL) => HL = 0 => LD r 0xAA
+                register_test(&[0xAA, load_instr, 0x76], state);
+            }
+            {
+                let addr = if i == 4 { 0xAAAA } else { 0x00AA };
+                let mem = SparseMem(HashMap::from([(addr, 0xAA)]));
+                let prep_instr = 0x06 | i << 3;
+                let load_instr = 0x40 | 6 << 3 | i;
+                // LD L 0xAA
+                // LD r 0xAA
+                // LD (HL) r
+                memory_test(&[0x2E, 0xAA, prep_instr, 0xAA, load_instr, 0x76], mem);
+            }
+        }
+    }
+
+    #[test]
+    fn alu_test() {
+
     }
 }
