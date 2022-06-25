@@ -186,6 +186,7 @@ impl RegisterFile {
             1 => self.de,
             2 => self.hl,
             3 => self.sp,
+            4 => self.af,
             _ => panic!("r16_read only valid for idx 0-3"),
         }
     }
@@ -202,6 +203,9 @@ impl RegisterFile {
             }
             3 => {
                 self.sp = val;
+            }
+            4 => {
+                self.af = val;
             }
             _ => {
                 panic!("r16_write only valid for idx 0-3");
@@ -247,7 +251,7 @@ impl<M: MemoryIfc> Cpu<M> {
 
     // Helper routines
 
-    fn mem_read(&mut self, addr: u16) -> u8 {
+    fn mem_read(&self, addr: u16) -> u8 {
         self.mem.borrow().read(addr)
     }
 
@@ -333,6 +337,9 @@ impl<M: MemoryIfc> Cpu<M> {
         self.mcycle = 0;
     }
 
+
+    // Misc / Control instructions -- complete
+
     fn nop(&mut self, _opcode: Opcode, mcycle: MCycle) {
         // Opcode: 00000000
         // Length: 1
@@ -340,19 +347,6 @@ impl<M: MemoryIfc> Cpu<M> {
         // Flags: - - - -
 
         assert!(mcycle == 1);
-        self.fetch();
-    }
-
-    fn halt(&mut self, _opcode: Opcode, mcycle: MCycle) {
-        // Opcode: 01110110
-        // Length: 1
-        // M-cycles: 1
-        // Flags: - - - -
-
-        assert!(mcycle == 1);
-
-        self.state.state = State::Halt;
-
         self.fetch();
     }
 
@@ -370,6 +364,32 @@ impl<M: MemoryIfc> Cpu<M> {
         self.fetch();
     }
 
+    fn halt(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 01110110
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - - - -
+
+        assert!(mcycle == 1);
+
+        self.state.state = State::Halt;
+
+        self.fetch();
+    }
+
+    fn prefix(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11001011
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - - - -
+
+        assert!(mcycle == 1);
+
+        self.opcode = self.read_inc_pc();
+        self.dispatch = Cpu::OPCODE_DISPATCH_PREFIX[self.opcode as usize];
+        self.mcycle = 0;
+    }
+
     fn di_ei(&mut self, opcode: Opcode, mcycle: MCycle) {
         // Opcode: 1111e011
         // e => 0 -> DI, 1 -> EI
@@ -383,6 +403,63 @@ impl<M: MemoryIfc> Cpu<M> {
         self.state.ime = enable;
 
         self.fetch();
+    }
+
+
+    // Jumps / Calls
+
+    // jump_rel
+
+    // jump_abs
+
+    // call
+
+    // ret
+
+    // reset
+
+    // reti
+
+    // jump_hl
+
+
+    // 8-bit load instructions -- complete
+
+    fn ld_8_imm(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00rrr110
+        // rrr => register / memory (HL)
+        // Length: 2
+        // M-cycles: 2 (r) / 3 (m)
+        // Flags: - - - -
+
+        let reg_index = opcode >> 3 & 0x07;
+
+        if mcycle == 1 {
+            self.temp8 = self.read_inc_pc();
+            return;
+        }
+
+        if reg_index != 6 {
+            assert!(mcycle == 2);
+
+            self.reg_8_write(reg_index, self.temp8);
+
+            self.fetch();
+        } else {
+            // reg_index == 6
+            // load to memory
+            match mcycle {
+                2 => {
+                    self.mem_write(self.state.reg.hl, self.temp8);
+                }
+                3 => {
+                    self.fetch();
+                }
+                _ => {
+                    panic!();
+                }
+            };
+        }
     }
 
     fn ld_8(&mut self, opcode: Opcode, mcycle: MCycle) {
@@ -431,43 +508,269 @@ impl<M: MemoryIfc> Cpu<M> {
         }
     }
 
-    fn ld_8_imm(&mut self, opcode: Opcode, mcycle: MCycle) {
-        // Opcode: 00rrr110
-        // rrr => register / memory (HL)
-        // Length: 2
-        // M-cycles: 2 (r) / 3 (m)
+    fn ld_8_rr(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 000rd010
+        // r => 16-bit register (BC or DE)
+        // d => direction (0 => memory write, 1 => memory read)
+        // Length: 1
+        // M-cycles: 2
         // Flags: - - - -
-
-        let reg_index = opcode >> 3 & 0x07;
-
-        if mcycle == 1 {
-            self.temp8 = self.read_inc_pc();
-            return;
-        }
-
-        if reg_index != 6 {
-            assert!(mcycle == 2);
-
-            self.reg_8_write(reg_index, self.temp8);
-
-            self.fetch();
-        } else {
-            // reg_index == 6
-            // load to memory
-            match mcycle {
-                2 => {
-                    self.mem_write(self.state.reg.hl, self.temp8);
+        match mcycle {
+            1 => {
+                let addr = self.reg_16_read(opcode >> 4 & 0x01);
+                match opcode >> 3 & 0x01 {
+                    0 => {
+                        self.mem_write(addr, self.state.reg.a());
+                    }
+                    _ => {
+                        self.state.reg.set_a(self.mem_read(addr));
+                    }
                 }
-                3 => {
-                    self.fetch();
-                }
-                _ => {
-                    panic!();
-                }
-            };
+            }
+            2 => {
+                self.fetch();
+            }
+            _ => panic!()
         }
     }
 
+    fn ld_8_hl(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 000id010
+        // i => increment/decrement HL
+        // d => direction (0 => memory write, 1 => memory read)
+        // Length: 1
+        // M-cycles: 2
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                match opcode >> 3 & 0x01 {
+                    0 => {
+                        self.mem_write(self.state.reg.hl, self.state.reg.a());
+                    }
+                    _ => {
+                        self.state.reg.set_a(self.mem_read(self.state.reg.hl));
+                    }
+                }
+                let inc = opcode >> 4 & 0x01 == 0;
+                self.state.reg.hl = self.state.reg.hl.wrapping_add(if inc { 1 } else { (-1i16) as u16 })
+            }
+            2 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn ld_8_aa(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 111d1010
+        // d => direction (0 => memory write, 1 => memory read)
+        // Length: 3
+        // M-cycles: 4
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.read_inc_pc() as u16;
+            }
+            2 => {
+                self.temp16 |= (self.read_inc_pc() << 8) as u16;
+            }
+            3 => {
+                match opcode >> 4 & 0x01 {
+                    0 => {
+                        self.mem_write(self.temp16, self.state.reg.a());
+                    }
+                    _ => {
+                        self.state.reg.set_a(self.mem_read(self.temp16));
+                    }
+                }
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn ldh_8(&mut self, opcode: Opcode, mut mcycle: MCycle) {
+        // Opcode: 111d00a0
+        // a => addr (0 => imm, 1 => C)
+        // d => direction (0 => memory write, 1 => memory read)
+        // Length: 1 (C) / 2 (imm)
+        // M-cycles: 2 (C) / 3 (imm)
+        // Flags: - - - -
+
+        if opcode >> 1 & 0x01 == 0 {
+            if mcycle == 1 {
+                self.temp8 = self.read_inc_pc();
+                return
+            }
+            else {
+                mcycle -= 1;
+            }
+        }
+        else {
+            self.temp8 = self.state.reg.c();
+        }
+        match mcycle {
+            1 => {
+                let addr = 0xFF00 | self.temp8 as u16;
+                match opcode >> 4 & 0x01 {
+                    0 => {
+                        self.mem_write(addr, self.state.reg.a());
+                    }
+                    _ => {
+                        self.state.reg.set_a(self.mem_read(self.temp16));
+                    }
+                }
+            }
+            2 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+
+    // 16-bit load instructions -- complete
+
+    fn ld_16_imm(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00rr0001
+        // rr => 16-bit register
+        // Length: 3
+        // M-cycles: 3
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.read_inc_pc() as u16;
+            }
+            2 => {
+                self.temp16 |= (self.read_inc_pc() as u16) << 8;
+                self.reg_16_write(opcode >> 4 & 0x03, self.temp16);
+            }
+            3 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn push(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11rr0101
+        // rr => 16-bit register (AF instead of SP)
+        // Length: 1
+        // M-cycles: 4
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                let reg_index = opcode >> 4 & 0x03;
+                self.temp16 = self.reg_16_read(if reg_index == 3 { 4 } else { reg_index });
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            2 => {
+                self.mem_write(self.state.reg.sp, (self.temp16 >> 8) as u8);
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            3 => {
+                self.mem_write(self.state.reg.sp, self.temp16 as u8);
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn pop(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11rr0001
+        // rr => 16-bit register (AF instead of SP)
+        // Length: 1
+        // M-cycles: 3
+        // Flags: - - - - (rr = 3 => replace flags)
+        match mcycle {
+            1 => {
+                self.temp16 = self.mem_read(self.state.reg.sp) as u16;
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            2 => {
+                self.temp16 |= (self.mem_read(self.state.reg.sp) as u16) << 8;
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            3 => {
+                let reg_index = opcode >> 4 & 0x03;
+                self.reg_16_write(if reg_index == 3 { 4 } else { reg_index }, self.temp16);
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn save_sp(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00001000
+        // Length: 3
+        // M-cycles: 5
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.read_inc_pc() as u16;
+            }
+            2 => {
+                self.temp16 |= (self.read_inc_pc() as u16) << 8;
+            }
+            3 => {
+                self.mem_write(self.temp16, self.state.reg.sp as u8);
+            }
+            4 => {
+                self.mem_write(self.temp16.wrapping_add(1), (self.state.reg.sp >> 8) as u8);
+            }
+            5 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn load_sp(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 111111001
+        // Length: 1
+        // M-cycles: 2
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.state.reg.sp = self.state.reg.hl;
+            }
+            2 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn sp_offs(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 111111000
+        // Length: 2
+        // M-cycles: 3
+        // Flags: 0 0 H C
+        match mcycle {
+            1 => {
+                self.temp8 = self.read_inc_pc();
+            }
+            2 => {
+                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp8, false, false, false);
+                self.state.reg.set_l(low);
+                self.state.reg.set_f(flags);
+            }
+            3 => {
+                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, 0, false, true, self.state.reg.cf());
+                self.state.reg.set_h(high);
+                self.state.reg.update_flags(0x00, 0xC0, flags, 0x30);
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+
+    // 8-bit ALU -- complete
     fn inc_dec_8(&mut self, opcode: Opcode, mcycle: MCycle) {
         // Opcode: 00rrr10d
         // rrr => register / memory (HL)
@@ -526,38 +829,6 @@ impl<M: MemoryIfc> Cpu<M> {
                 _ => {
                     panic!();
                 }
-            }
-        }
-    }
-
-    fn inc_dec_16(&mut self, opcode: Opcode, mcycle: MCycle) {
-        // Opcode: 00rrd011
-        // rr => register
-        // d => 0 -> inc, 1 -> dec
-        // Length: 1
-        // M-cycles: 2
-        // Flags: - - - -
-
-        let dec = (opcode & 0x08) != 0;
-        let reg_index = (opcode >> 4) & 0x03;
-
-        match mcycle {
-            1 => {
-                self.temp8 = self.state.reg.f();
-                self.temp16 = self.reg_16_read(reg_index);
-                let (val, flags) = Self::add_sub(self.temp16 as u8, 1, dec, false, self.state.reg.cf());
-                self.temp16 = (self.temp16 & 0xFF00) | val as u16;
-                self.state.reg.set_f(flags);
-            }
-            2 => {
-                let (val, _) = Self::add_sub((self.temp16 >> 8) as u8, 0, dec, true, self.state.reg.cf());
-                self.reg_16_write(reg_index, self.temp16 & 0x00FF | (val as u16) << 8);
-                self.state.reg.set_f(self.temp8);
-
-                self.fetch();
-            }
-            _ => {
-                panic!();
             }
         }
     }
@@ -659,54 +930,189 @@ impl<M: MemoryIfc> Cpu<M> {
         self.fetch();
     }
 
-    fn prefix(&mut self, _opcode: Opcode, mcycle: MCycle) {
-        // Opcode: 11001011
+    fn daa(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00100111
         // Length: 1
         // M-cycles: 1
-        // Flags: - - - -
-
+        // Flags: Z - 0 C
         assert!(mcycle == 1);
 
-        self.opcode = self.read_inc_pc();
-        self.dispatch = Cpu::OPCODE_DISPATCH_PREFIX[self.opcode as usize];
-        self.mcycle = 0;
+        let mut a = self.state.reg.a();
+        if self.state.reg.hf() || a & 0x0F >= 0x0A {
+            // adjust low nybble
+            a = a.wrapping_add(0x06);
+        }
+        if self.state.reg.cf() || a & 0xF0 >= 0xA0 {
+            // adjust high nybble
+            a = a.wrapping_add(0x60);
+            self.state.reg.update_flags(0x10, 0x00, 0x00, 0x00)
+        }
+
+        self.state.reg.update_flags(if a == 0 { 0x80 } else { 0x00 }, 0x20, 0x00, 0x00);
+        self.state.reg.set_a(a);
+
+        self.fetch();
+    }
+
+    fn cpl(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00101111
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - 1 1 -
+        assert!(mcycle == 1);
+
+        self.state.reg.set_a(!self.state.reg.a());
+        self.state.reg.update_flags(0x60, 0x00, 0x00, 0x00);
+
+        self.fetch();
+    }
+
+    fn scf(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00110111
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - 0 0 1
+        assert!(mcycle == 1);
+
+        self.state.reg.update_flags(0x10, 0x60, 0x00, 0x00);
+
+        self.fetch();
+    }
+
+    fn ccf(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00111111
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - 0 0 C
+        assert!(mcycle == 1);
+
+        self.state.reg.update_flags(0x00, 0x60, !self.state.reg.f(), 0x10);
+
+        self.fetch();
     }
 
 
+    // 16-bit ALU -- complete
+
+    fn inc_dec_16(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 00rrd011
+        // rr => register
+        // d => 0 -> inc, 1 -> dec
+        // Length: 1
+        // M-cycles: 2
+        // Flags: - - - -
+
+        let dec = (opcode & 0x08) != 0;
+        let reg_index = (opcode >> 4) & 0x03;
+
+        match mcycle {
+            1 => {
+                self.temp8 = self.state.reg.f();
+                self.temp16 = self.reg_16_read(reg_index);
+                let (val, flags) = Self::add_sub(self.temp16 as u8, 1, dec, false, self.state.reg.cf());
+                self.temp16 = (self.temp16 & 0xFF00) | val as u16;
+                self.state.reg.set_f(flags);
+            }
+            2 => {
+                let (val, _) = Self::add_sub((self.temp16 >> 8) as u8, 0, dec, true, self.state.reg.cf());
+                self.reg_16_write(reg_index, self.temp16 & 0x00FF | (val as u16) << 8);
+                self.state.reg.set_f(self.temp8);
+
+                self.fetch();
+            }
+            _ => {
+                panic!();
+            }
+        }
+    }
+
+    fn add_hl(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 000rr1001
+        // rr => 16-bit register
+        // Length: 1
+        // M-cycles: 2
+        // Flags: - 0 H C
+        let reg_index = opcode >> 4 & 0x03;
+        match mcycle {
+            1 => {
+                let (low, flags) = Self::add_sub(self.state.reg.l(), self.reg_16_read(reg_index) as u8, false, false, false);
+                self.state.reg.set_l(low);
+                self.state.reg.update_flags(0x00, 0x40, flags, 0x30);
+            }
+            2 => {
+                let (high, flags) = Self::add_sub(self.state.reg.h(), (self.reg_16_read(reg_index) >> 8) as u8, false, true, self.state.reg.cf());
+                self.state.reg.set_h(high);
+                self.state.reg.update_flags(0x00, 0x40, flags, 0x30);
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+    fn add_sp(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 111101000
+        // Length: 2
+        // M-cycles: 4
+        // Flags: 0 0 H C
+        match mcycle {
+            1 => {
+                self.temp8 = self.read_inc_pc();
+            }
+            2 => {
+                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp8, false, false, false);
+                self.state.reg.sp = self.state.reg.sp & 0xFF00 | low as u16;
+                self.state.reg.set_f(flags);
+            }
+            3 => {
+                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, 0, false, true, self.state.reg.cf());
+                self.state.reg.sp = self.state.reg.sp & 0x00FF | (high as u16) << 8;
+                self.state.reg.update_flags(0x00, 0xC0, flags, 0x30);
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
+
+    // 8-bit shift, rotate, bit
+    // ...
+
     #[cfg_attr(rustfmt, rustfmt_skip)]
     const OPCODE_DISPATCH: [InstructionFn<M>; 256] = [
-        Cpu::nop,     Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::stop,    Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,     Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::prefix,     Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::nop,     Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::save_sp, Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::stop,    Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::invalid, Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
+        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
+        Cpu::invalid, Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
+        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::ccf,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
+        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::invalid, Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::invalid, Cpu::invalid,   Cpu::invalid, Cpu::prefix,     Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::invalid, Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::invalid, Cpu::invalid,   Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::ldh_8,   Cpu::pop,       Cpu::ldh_8,   Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::add_sp,  Cpu::invalid,   Cpu::ld_8_aa, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::ldh_8,   Cpu::pop,       Cpu::ldh_8,   Cpu::di_ei,      Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::sp_offs, Cpu::load_sp,   Cpu::ld_8_aa, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
     ];
     
     #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -808,8 +1214,16 @@ mod tests {
         assert_eq!(expected, *mem.borrow());
     }
 
+    // Misc / Control instructions
+
+
+    // Jumps / Calls
+
+
+    // 8-bit load instructions
+
     #[test]
-    fn load_immediate_test() {
+    fn load_immediate_8_test() {
         {
             let mut state = CpuState::new();
             state.reg.set_b(0xAA);
@@ -853,6 +1267,78 @@ mod tests {
             register_test(&[0x3E, 0xAA, 0x76], state);
         }
     }
+
+    #[test]
+    fn load_register_8_test() {
+        for i in 0..8 {
+            if i == 6 { continue; }
+            for j in 0..8 {
+                if j == 6 { continue; }
+                let mut state = CpuState::new();
+                state.reg.r8_write(i, 0xAA);
+                state.reg.r8_write(j, 0xAA);
+                let prep_instr = 0x06 | i << 3;
+                let load_instr = 0x40 | j << 3 | i;
+                // LD r1 0xAA
+                // LD r2 r1
+                register_test(&[prep_instr, 0xAA, load_instr, 0x76], state);
+            }
+            {
+                let mut state = CpuState::new();
+                state.reg.r8_write(i, 0xAA);
+                state.reg.set_f(0x80);
+                let load_instr = 0x40 | i << 3 | 6;
+                // 0xAA (XOR D) => dummy instruction / payload for LD r (HL)
+                // LD r (HL) => HL = 0 => LD r 0xAA
+                register_test(&[0xAA, load_instr, 0x76], state);
+            }
+            {
+                let addr = if i == 4 { 0xAAAA } else { 0x00AA };
+                let mem = SparseMem(HashMap::from([(addr, 0xAA)]));
+                let prep_instr = 0x06 | i << 3;
+                let load_instr = 0x40 | 6 << 3 | i;
+                // LD L 0xAA
+                // LD r 0xAA
+                // LD (HL) r
+                memory_test(&[0x2E, 0xAA, prep_instr, 0xAA, load_instr, 0x76], mem);
+            }
+        }
+    }
+
+    // load_memory_8_test()
+
+
+    // 16-bit load instructions
+
+    #[test]
+    fn load_immediate_16_test() {
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xDEAD;
+            // LD rr 0xDEAD
+            register_test(&[0x01, 0xAD, 0xDE, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.de = 0xDEAD;
+            register_test(&[0x11, 0xAD, 0xDE, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xDEAD;
+            register_test(&[0x21, 0xAD, 0xDE, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDEAD;
+            register_test(&[0x31, 0xAD, 0xDE, 0x76], state);
+        }
+    }
+
+    // stack_test()
+
+
+    // 8-bit ALU
 
     #[test]
     fn inc_dec_8_test() {
@@ -1029,6 +1515,140 @@ mod tests {
     }
 
     #[test]
+    fn alu_test() {
+        // test that registers are handled properly
+        for i in 0..8 {
+            for op in 0..8 {
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(match op {
+                        0 | 1 => std::ops::Add::add,
+                        2 => std::ops::Sub::sub,
+                        3 => |a: u8, b:u8| a.wrapping_sub(b).wrapping_sub(1),
+                        4 => std::ops::BitAnd::bitand,
+                        5 => std::ops::BitXor::bitxor,
+                        6 => std::ops::BitOr::bitor,
+                        7 => |a: u8, _| a,
+                        _ => panic!()
+                    }(if i != 7 { 0x42 } else { 0x2B }, 0x2B));
+                    state.reg.set_f(match op {
+                        0 | 1 => if i == 7 { 0x20 } else { 0x00 },
+                        2 => if i == 7 { 0xF0 } else { 0x50 },
+                        3 => if i == 7 { 0x40 } else { 0x50 },
+                        4 => 0x20,
+                        5 => if i == 7 { 0x80 } else { 0x00 },
+                        6 => 0x00,
+                        7 => if i == 7 { 0xF0 } else { 0x50 },
+                        _ => panic!()
+                    });
+                    let prep_instr = 0x06 | i << 3;
+                    let alu_instr = 0x80 | op << 3 | i;
+                    if i != 6 {
+                        if i != 7 {
+                            state.reg.r8_write(i, 0x2B);
+                        }
+                        // LD A 0x42
+                        // LD r 0x2B
+                        // alu A r
+                        register_test(&[0x3E, 0x42, prep_instr, 0x2B, alu_instr, 0x76], state);
+                    } else {
+                        state.reg.hl = 0xFFFF;
+                        // LD A 0x42
+                        // DEC HL
+                        // LD (HL) 0x2B
+                        // alu A (HL)
+                        register_test(&[0x3E, 0x42, 0x2B, prep_instr, 0x2B, alu_instr, 0x76], state);
+                    }
+                }
+            }
+        }
+
+        // test multi-byte addition (ADD + ADC with carry)
+        {
+            let bc = 0xDEAD;
+            let de = 0x12BE;
+            let hl = bc + de;
+            let mut state = CpuState::new();
+            state.reg.bc = bc;
+            state.reg.de = de;
+            state.reg.hl = hl;
+            state.reg.set_a(state.reg.h());
+            state.reg.set_f(0x20);
+            // LD BC 0x1248
+            // LD DE 0x3141
+            // LD A C
+            // ADD A E
+            // LD L A
+            // LD A B
+            // ADC A D
+            // LD H A
+            register_test(&[0x01, 0xAD, 0xDE, 0x11, 0xBE, 0x12, 0x79, 0x83, 0x6F, 0x78, 0x8A, 0x67, 0x76], state);
+        }
+        // test multi-byte subtraction (SUB + SBC with borrow)
+        {
+            let bc = 0xDEAD;
+            let de = 0x12BE;
+            let hl = bc - de;
+            let mut state = CpuState::new();
+            state.reg.bc = bc;
+            state.reg.de = de;
+            state.reg.hl = hl;
+            state.reg.set_a(state.reg.h());
+            state.reg.set_f(0x70);
+            // LD BC 0x1248
+            // LD DE 0x3141
+            // LD A C
+            // SUB A E
+            // LD L A
+            // LD A B
+            // SBC A D
+            // LD H A
+            register_test(&[0x01, 0xAD, 0xDE, 0x11, 0xBE, 0x12, 0x79, 0x93, 0x6F, 0x78, 0x9A, 0x67, 0x76], state);
+        }
+        // test multi-byte subtraction (SUB + SBC without borrow)
+        {
+            let bc = 0xDEAD;
+            let de = 0x1248;
+            let hl = bc - de;
+            let mut state = CpuState::new();
+            state.reg.bc = bc;
+            state.reg.de = de;
+            state.reg.hl = hl;
+            state.reg.set_a(state.reg.h());
+            state.reg.set_f(0x70);
+            // LD BC 0x1248
+            // LD DE 0x3141
+            // LD A C
+            // SUB A E
+            // LD L A
+            // LD A B
+            // SBC A D
+            // LD H A
+            register_test(&[0x01, 0xAD, 0xDE, 0x11, 0x48, 0x12, 0x79, 0x93, 0x6F, 0x78, 0x9A, 0x67, 0x76], state);
+        }
+        // test scf
+        {
+            //TODO
+        }
+        // test ccf
+        {
+            //TODO
+        }
+        // test cpl
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0x55);
+            state.reg.set_f(0x60);
+            register_test(&[0x3E, 0xAA, 0x2F, 0x76], state);
+        }
+    }
+
+    // bcd_test()
+
+
+    // 16-bit ALU
+
+    #[test]
     fn inc_dec_16_test() {
         {
             let mut state = CpuState::new();
@@ -1080,91 +1700,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn load_register_test() {
-        for i in 0..8 {
-            if i == 6 { continue; }
-            for j in 0..8 {
-                if j == 6 { continue; }
-                let mut state = CpuState::new();
-                state.reg.r8_write(i, 0xAA);
-                state.reg.r8_write(j, 0xAA);
-                let prep_instr = 0x06 | i << 3;
-                let load_instr = 0x40 | j << 3 | i;
-                // LD r1 0xAA
-                // LD r2 r1
-                register_test(&[prep_instr, 0xAA, load_instr, 0x76], state);
-            }
-            {
-                let mut state = CpuState::new();
-                state.reg.r8_write(i, 0xAA);
-                state.reg.set_f(0x80);
-                let load_instr = 0x40 | i << 3 | 6;
-                // 0xAA (XOR D) => dummy instruction / payload for LD r (HL)
-                // LD r (HL) => HL = 0 => LD r 0xAA
-                register_test(&[0xAA, load_instr, 0x76], state);
-            }
-            {
-                let addr = if i == 4 { 0xAAAA } else { 0x00AA };
-                let mem = SparseMem(HashMap::from([(addr, 0xAA)]));
-                let prep_instr = 0x06 | i << 3;
-                let load_instr = 0x40 | 6 << 3 | i;
-                // LD L 0xAA
-                // LD r 0xAA
-                // LD (HL) r
-                memory_test(&[0x2E, 0xAA, prep_instr, 0xAA, load_instr, 0x76], mem);
-            }
-        }
-    }
+    // 8-bit shift, rotate, bit
 
-    #[test]
-    fn alu_test() {
-        // test that registers are handled properly
-        for i in 0..8 {
-            for op in 0..8 {
-                {
-                    let mut state = CpuState::new();
-                    state.reg.set_a(match op {
-                        0 | 1 => std::ops::Add::add,
-                        2 => std::ops::Sub::sub,
-                        3 => |a: u8, b:u8| a.wrapping_sub(b).wrapping_sub(1),
-                        4 => std::ops::BitAnd::bitand,
-                        5 => std::ops::BitXor::bitxor,
-                        6 => std::ops::BitOr::bitor,
-                        7 => |a: u8, _| a,
-                        _ => panic!()
-                    }(if i != 7 { 0x42 } else { 0x2B }, 0x2B));
-                    state.reg.set_f(match op {
-                        0 | 1 => if i == 7 { 0x20 } else { 0x00 },
-                        2 => if i == 7 { 0xF0 } else { 0x50 },
-                        3 => if i == 7 { 0x40 } else { 0x50 },
-                        4 => 0x20,
-                        5 => if i == 7 { 0x80 } else { 0x00 },
-                        6 => 0x00,
-                        7 => if i == 7 { 0xF0 } else { 0x50 },
-                        _ => panic!()
-                    });
-                    let prep_instr = 0x06 | i << 3;
-                    let alu_instr = 0x80 | op << 3 | i;
-                    if i != 6 {
-                        if i != 7 {
-                            state.reg.r8_write(i, 0x2B);
-                        }
-                        // LD A 0x42
-                        // LD r 0x2B
-                        // alu A r
-                        register_test(&[0x3E, 0x42, prep_instr, 0x2B, alu_instr, 0x76], state);
-                    } else {
-                        state.reg.hl = 0xFFFF;
-                        // LD A 0x42
-                        // DEC HL
-                        // LD (HL) 0x2B
-                        // alu A (HL)
-                        register_test(&[0x3E, 0x42, 0x2B, prep_instr, 0x2B, alu_instr, 0x76], state);
-                    }
-                }
-            }
-        }
-
-    }
 }
