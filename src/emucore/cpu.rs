@@ -129,7 +129,7 @@ impl RegisterFile {
         self.af |= (val as u16) << 8;
     }
     fn f(&self) -> u8 {
-        self.af as u8 & 0x0F
+        self.af as u8 & 0xF0
     }
     fn set_f(&mut self, val: u8) {
         self.af &= 0xFF00;
@@ -205,7 +205,7 @@ impl RegisterFile {
                 self.sp = val;
             }
             4 => {
-                self.af = val;
+                self.af = val & 0xFFF0;
             }
             _ => {
                 panic!("r16_write only valid for idx 0-3");
@@ -275,36 +275,22 @@ impl<M: MemoryIfc> Cpu<M> {
         self.state.reg.r16_write(idx, val);
     }
 
-    fn add_sub(op1: u8, mut op2: u8, sub: bool, use_carry: bool, carry_in: bool) -> (u8, u8) {
-        let mut flags_out = 0;
+    fn adder(op1: u8, op2: u8, carry_in: bool) -> (u8, bool, bool) {
+        let (intermediate, carry) = op1.overflowing_add(carry_in as u8);
+        let (result, carry2) = intermediate.overflowing_add(op2);
+        let half_carry = (op1 & 0x0F) + (op2 & 0x0F) + carry_in as u8 > 0x0F;
+        (result, carry || carry2, half_carry)
+    }
 
-        if use_carry && (carry_in ^ sub) {
-            op2 = op2.wrapping_add(1);
-        }
+    fn add_sub(op1: u8, op2: u8, sub: bool, use_carry: bool, carry_in: bool) -> (u8, u8) {
+        let actual_carry_in = if use_carry { carry_in } else { sub };
 
-        if sub {
-            op2 = 0u8.wrapping_sub(op2);
-            // negative/subtract flag
-            flags_out |= 0x40;
-        }
+        let (ret, carry, half_carry) = Self::adder(op1, if sub { !op2 } else { op2 }, actual_carry_in);
 
-        let ret = op1.wrapping_add(op2);
-
-        if ret == 0 {
-            // zero flag
-            flags_out |= 0x80;
-        }
-
-        if ret < op1 {
-            // carry flag
-            flags_out |= 0x10;
-        }
-
-        if (ret & 0x0F) < (op1 & 0x0F) {
-            // half-carry flag
-            flags_out |= 0x20;
-        }
-
+        let flags_out = if ret == 0 { 0x80 } else { 0x00 } |
+            if sub { 0x40 } else { 0x00 } |
+            if half_carry { 0x20 } else { 0x00 } |
+            if carry { 0x10 } else { 0x00 };
         (ret, flags_out)
     }
 
@@ -572,7 +558,7 @@ impl<M: MemoryIfc> Cpu<M> {
                 self.temp16 = self.read_inc_pc() as u16;
             }
             2 => {
-                self.temp16 |= (self.read_inc_pc() << 8) as u16;
+                self.temp16 |= (self.read_inc_pc() as u16) << 8;
             }
             3 => {
                 match opcode >> 4 & 0x01 {
@@ -689,11 +675,11 @@ impl<M: MemoryIfc> Cpu<M> {
         match mcycle {
             1 => {
                 self.temp16 = self.mem_read(self.state.reg.sp) as u16;
-                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+                self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
             }
             2 => {
                 self.temp16 |= (self.mem_read(self.state.reg.sp) as u16) << 8;
-                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+                self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
             }
             3 => {
                 let reg_index = opcode >> 4 & 0x03;
@@ -745,22 +731,22 @@ impl<M: MemoryIfc> Cpu<M> {
         }
     }
 
-    fn sp_offs(&mut self, _opcode: Opcode, mcycle: MCycle) {
+    fn ld_sp_offs(&mut self, _opcode: Opcode, mcycle: MCycle) {
         // Opcode: 111111000
         // Length: 2
         // M-cycles: 3
         // Flags: 0 0 H C
         match mcycle {
             1 => {
-                self.temp8 = self.read_inc_pc();
+                self.temp16 = self.read_inc_pc() as i8 as u16;
             }
             2 => {
-                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp8, false, false, false);
+                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp16 as u8, false, false, false);
                 self.state.reg.set_l(low);
                 self.state.reg.set_f(flags);
             }
             3 => {
-                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, 0, false, true, self.state.reg.cf());
+                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, (self.temp16 >> 8) as u8, false, true, self.state.reg.cf());
                 self.state.reg.set_h(high);
                 self.state.reg.update_flags(0x00, 0xC0, flags, 0x30);
                 self.fetch();
@@ -938,17 +924,31 @@ impl<M: MemoryIfc> Cpu<M> {
         assert!(mcycle == 1);
 
         let mut a = self.state.reg.a();
-        if self.state.reg.hf() || a & 0x0F >= 0x0A {
+        let sub = self.state.reg.nf();
+        if self.state.reg.hf() ^ sub || a & 0x0F >= 0x0A {
             // adjust low nybble
-            a = a.wrapping_add(0x06);
+            let (low_adjust, low_flags) = Self::add_sub(a, 0x06, sub, false, false);
+            a = low_adjust;
+            if sub {
+                self.state.reg.update_flags(0x00, !low_flags & 0x10, low_flags, 0x80);
+            }
+            else {
+                self.state.reg.update_flags(low_flags & 0x10, 0x00, low_flags, 0x80);
+            }
         }
-        if self.state.reg.cf() || a & 0xF0 >= 0xA0 {
+        if self.state.reg.cf() ^ sub || a >= 0xA0 {
             // adjust high nybble
-            a = a.wrapping_add(0x60);
-            self.state.reg.update_flags(0x10, 0x00, 0x00, 0x00)
+            let (high_adjust, high_flags) = Self::add_sub(a, 0x60, sub, false, false);
+            a = high_adjust;
+            if sub {
+                self.state.reg.update_flags(0x00, !high_flags & 0x10, high_flags, 0x80);
+            }
+            else {
+                self.state.reg.update_flags(high_flags & 0x10, 0x00, high_flags, 0x80);
+            }
         }
 
-        self.state.reg.update_flags(if a == 0 { 0x80 } else { 0x00 }, 0x20, 0x00, 0x00);
+        self.state.reg.update_flags(0x00, 0x20, 0x00, 0x00);
         self.state.reg.set_a(a);
 
         self.fetch();
@@ -1049,22 +1049,22 @@ impl<M: MemoryIfc> Cpu<M> {
         }
     }
 
-    fn add_sp(&mut self, _opcode: Opcode, mcycle: MCycle) {
+    fn add_sp_offs(&mut self, _opcode: Opcode, mcycle: MCycle) {
         // Opcode: 111101000
         // Length: 2
         // M-cycles: 4
         // Flags: 0 0 H C
         match mcycle {
             1 => {
-                self.temp8 = self.read_inc_pc();
+                self.temp16 = (self.read_inc_pc() as i8) as u16;
             }
             2 => {
-                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp8, false, false, false);
+                let (low, flags) = Self::add_sub(self.state.reg.sp as u8, self.temp16 as u8, false, false, false);
                 self.state.reg.sp = self.state.reg.sp & 0xFF00 | low as u16;
                 self.state.reg.set_f(flags);
             }
             3 => {
-                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, 0, false, true, self.state.reg.cf());
+                let (high, flags) = Self::add_sub((self.state.reg.sp >> 8) as u8, (self.temp16 >> 8) as u8, false, true, self.state.reg.cf());
                 self.state.reg.sp = self.state.reg.sp & 0x00FF | (high as u16) << 8;
                 self.state.reg.update_flags(0x00, 0xC0, flags, 0x30);
             }
@@ -1081,38 +1081,38 @@ impl<M: MemoryIfc> Cpu<M> {
 
     #[cfg_attr(rustfmt, rustfmt_skip)]
     const OPCODE_DISPATCH: [InstructionFn<M>; 256] = [
-        Cpu::nop,     Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::save_sp, Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::stop,    Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid, Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
-        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
-        Cpu::invalid, Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
-        Cpu::invalid, Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::ccf,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
-        Cpu::ld_8,    Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,     Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::invalid, Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid,   Cpu::invalid, Cpu::prefix,     Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::invalid, Cpu::invalid,   Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::ldh_8,   Cpu::pop,       Cpu::ldh_8,   Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::add_sp,  Cpu::invalid,   Cpu::ld_8_aa, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::ldh_8,   Cpu::pop,       Cpu::ldh_8,   Cpu::di_ei,      Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::sp_offs, Cpu::load_sp,   Cpu::ld_8_aa, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::nop,         Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::save_sp,     Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::stop,        Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::invalid,     Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
+        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
+        Cpu::invalid,     Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
+        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::ccf,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::invalid,     Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::invalid,     Cpu::invalid,   Cpu::invalid, Cpu::prefix,     Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::invalid,     Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::invalid,     Cpu::invalid,   Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,   Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::add_sp_offs, Cpu::invalid,   Cpu::ld_8_aa, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,   Cpu::di_ei,      Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
+        Cpu::ld_sp_offs,  Cpu::load_sp,   Cpu::ld_8_aa, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
     ];
     
     #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -1211,7 +1211,7 @@ mod tests {
 
         expected.0.extend(with_address(instr));
 
-        assert_eq!(expected, *mem.borrow());
+        assert_eq!(*mem.borrow(), expected);
     }
 
     // Misc / Control instructions
@@ -1305,7 +1305,143 @@ mod tests {
         }
     }
 
-    // load_memory_8_test()
+    #[test]
+    fn load_memory_8_test() {
+        // test memory stores
+        {
+            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            // LD A 0xAA
+            // LD BC 0xBEEF
+            // LD (BC) A
+            memory_test(&[0x3E, 0xAA, 0x01, 0xEF, 0xBE, 0x02, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            // LD A 0xAA
+            // LD DE 0xBEEF
+            // LD (DE) A
+            memory_test(&[0x3E, 0xAA, 0x11, 0xEF, 0xBE, 0x12, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            // LD A 0xAA
+            // LD HL 0xBEEF
+            // LD (HL+) A
+            memory_test(&[0x3E, 0xAA, 0x21, 0xEF, 0xBE, 0x22, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            // LD A 0xAA
+            // LD HL 0xBEEF
+            // LD (HL-) A
+            memory_test(&[0x3E, 0xAA, 0x21, 0xEF, 0xBE, 0x32, 0x76], mem);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEF0;
+            // LD HL 0xBEEF
+            // LD (HL+) A
+            register_test(&[0x21, 0xEF, 0xBE, 0x22, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEE;
+            // LD HL 0xBEEF
+            // LD (HL-) A
+            register_test(&[0x21, 0xEF, 0xBE, 0x32, 0x76], state);
+        }
+        // memory loads
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEF;
+            state.reg.bc = 0xBEEF;
+            state.reg.set_a(0xAA);
+            // LD HL 0xBEEF
+            // LD (HL) 0xAA
+            // LD BC 0xBEEF
+            // LD A (BC)
+            register_test(&[0x21, 0xEF, 0xBE, 0x36, 0xAA, 0x01, 0xEF, 0xBE, 0x0A, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEF;
+            state.reg.de = 0xBEEF;
+            state.reg.set_a(0xAA);
+            // LD HL 0xBEEF
+            // LD (HL) 0xAA
+            // LD DE 0xBEEF
+            // LD A (DE)
+            register_test(&[0x21, 0xEF, 0xBE, 0x36, 0xAA, 0x11, 0xEF, 0xBE, 0x1A, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEF0;
+            state.reg.set_a(0xAA);
+            // LD HL 0xBEEF
+            // LD (HL) 0xAA
+            // LD A (HL+)
+            register_test(&[0x21, 0xEF, 0xBE, 0x36, 0xAA, 0x2A, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEE;
+            state.reg.set_a(0xAA);
+            // LD HL 0xBEEF
+            // LD (HL) 0xAA
+            // LD A (HL-)
+            register_test(&[0x21, 0xEF, 0xBE, 0x36, 0xAA, 0x3A, 0x76], state);
+        }
+        // immediate address load/store
+        {
+            let mem = SparseMem(HashMap::from([(0xDEAD, 0xAA)]));
+            // LD A 0xAA
+            // LD (0xDEAD) A
+            memory_test(&[0x3E, 0xAA, 0xEA, 0xAD, 0xDE, 0x76], mem);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0xAA);
+            state.reg.hl = 0xDEAD;
+            // LD HL 0xDEAD
+            // LD (HL) 0xAA
+            // LD A (0xDEAD)
+            register_test(&[0x21, 0xAD, 0xDE, 0x36, 0xAA, 0xFA, 0xAD, 0xDE, 0x76], state);
+        }
+        // High memory load/store
+        {
+            let mem = SparseMem(HashMap::from([(0xFF42, 0xAA)]));
+            // LD A 0xAA
+            // LDH (0x42) A
+            memory_test(&[0x3E, 0xAA, 0xE0, 0x42, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xFF42, 0xAA)]));
+            // LD A 0xAA
+            // LD C 0x42
+            // LDH (C) A
+            memory_test(&[0x3E, 0xAA, 0x0E, 0x42, 0xE2, 0x76], mem);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0xAA);
+            state.reg.hl = 0xFF42;
+            // LD HL 0xFF42
+            // LD (HL) 0xAA
+            // LDH A (0x42)
+            register_test(&[0x21, 0x42, 0xFF, 0x36, 0xAA, 0xF0, 0x42, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_a(0xAA);
+            state.reg.set_c(0x42);
+            state.reg.hl = 0xFF42;
+            // LD HL 0xFF42
+            // LD (HL) 0xAA
+            // LD C 0x42
+            // LDH A (C)
+            register_test(&[0x21, 0x42, 0xFF, 0x36, 0xAA, 0x0E, 0x42, 0xF2, 0x76], state);
+        }
+    }
 
 
     // 16-bit load instructions
@@ -1335,7 +1471,110 @@ mod tests {
         }
     }
 
-    // stack_test()
+    #[test]
+    fn stack_test() {
+        // test PUSH
+        {
+            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            // LD SP 0xE000
+            // LD BC 0xBEEF
+            // PUSH BC
+            memory_test(&[0x31, 0x00, 0xE0, 0x01, 0xEF, 0xBE, 0xC5, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            // LD SP 0xE000
+            // LD DE 0xBEEF
+            // PUSH DE
+            memory_test(&[0x31, 0x00, 0xE0, 0x11, 0xEF, 0xBE, 0xD5, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            // LD SP 0xE000
+            // LD BC 0xBEEF
+            // PUSH BC
+            memory_test(&[0x31, 0x00, 0xE0, 0x21, 0xEF, 0xBE, 0xE5, 0x76], mem);
+        }
+        {
+            let mem = SparseMem(HashMap::from([(0xDFFE, 0x10), (0xDFFF, 0xAA)]));
+            // LD SP 0xE000
+            // LD A 0xAA
+            // SCF
+            // PUSH BC
+            memory_test(&[0x31, 0x00, 0xE0, 0x3E, 0xAA, 0x37, 0xF5, 0x76], mem);
+        }
+        // test POP
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xDEAD;
+            state.reg.de = 0xDEAD;
+            // LD DE 0xDEAD
+            // PUSH DE
+            // POP BC
+            register_test(&[0x11, 0xAD, 0xDE, 0xD5, 0xC1, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xDEAD;
+            state.reg.de = 0xDEAD;
+            // LD BC 0xDEAD
+            // PUSH BC
+            // POP DE
+            register_test(&[0x01, 0xAD, 0xDE, 0xC5, 0xD1, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xDEAD;
+            state.reg.hl = 0xDEAD;
+            // LD BC 0xDEAD
+            // PUSH BC
+            // POP HL
+            register_test(&[0x01, 0xAD, 0xDE, 0xC5, 0xE1, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xDEAD;
+            state.reg.af = 0xDEA0;
+            // LD BC 0xDEAD
+            // PUSH BC
+            // POP AF
+            register_test(&[0x01, 0xAD, 0xDE, 0xC5, 0xF1, 0x76], state);
+        }
+        // test save SP to addr16
+        {
+            let mem = SparseMem(HashMap::from([(0xDEAD, 0x00), (0xDEAE, 0xE0)]));
+            // LD SP 0xE000
+            // LD (0xDEAD) SP
+            memory_test(&[0x31, 0x00, 0xE0, 0x08, 0xAD, 0xDE, 0x76], mem);
+        }
+        // test load SP from HL
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEF;
+            state.reg.sp = 0xBEEF;
+            // LD HL 0xBEEF
+            // LD SP HL
+            register_test(&[0x21, 0xEF, 0xBE, 0xF9, 0x76], state);
+        }
+        // test load signed offset from SP to HL
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDEAD;
+            state.reg.hl = 0xDEAD + 0x42;
+            // LD SP 0xDEAD
+            // LD HL SP + 0x42
+            register_test(&[0x31, 0xAD, 0xDE, 0xF8, 0x42, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDEAD;
+            state.reg.hl = 0xDEAD - 0x42;
+            state.reg.set_f(0x30);
+            // LD SP 0xDEAD
+            // LD HL SP - 0x42
+            register_test(&[0x31, 0xAD, 0xDE, 0xF8, 0xBE, 0x76], state);
+        }
+    }
 
 
     // 8-bit ALU
@@ -1584,8 +1823,8 @@ mod tests {
             // LD H A
             register_test(&[0x01, 0xAD, 0xDE, 0x11, 0xBE, 0x12, 0x79, 0x83, 0x6F, 0x78, 0x8A, 0x67, 0x76], state);
         }
-        // test multi-byte subtraction (SUB + SBC with borrow)
         {
+            // test multi-byte subtraction (SUB + SBC with borrow)
             let bc = 0xDEAD;
             let de = 0x12BE;
             let hl = bc - de;
@@ -1628,11 +1867,18 @@ mod tests {
         }
         // test scf
         {
-            //TODO
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            register_test(&[0x37, 0x76], state);
         }
         // test ccf
         {
-            //TODO
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            register_test(&[0x3F, 0x76], state);
+        }
+        {
+            register_test(&[0x37, 0x3F, 0x76], CpuState::new());
         }
         // test cpl
         {
@@ -1643,7 +1889,180 @@ mod tests {
         }
     }
 
-    // bcd_test()
+    #[test]
+    fn add_sub_exhaustive_test() {
+        // exhaustive test of all ADD/ADC/SUB/SBC calculations, because I can't be bothered to think of all the edge case
+        for a in 0..=255u8 {
+            for b in 0..=255 {
+                // test ADD and ADC (should behave identically without carry-in)
+                {
+                    let mut state = CpuState::new();
+                    let (res, overflow) = a.overflowing_add(b);
+                    let half_carry = res & 0x0F < a & 0x0F;
+                    state.reg.set_a(res);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res == 0 { 0x80 } else { 0x00 } | if half_carry { 0x20 } else { 0x00 } | if overflow { 0x10 } else { 0x00 });
+                    // LD A a
+                    // LD B b
+                    // ADD A B
+                    register_test(&[0x3E, a, 0x06, b, 0x80, 0x76], state);
+                }
+                {
+                    let mut state = CpuState::new();
+                    let (res, overflow) = a.overflowing_add(b);
+                    let half_carry = res & 0x0F < a & 0x0F;
+                    state.reg.set_a(res);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res == 0 { 0x80 } else { 0x00 } | if half_carry { 0x20 } else { 0x00 } | if overflow { 0x10 } else { 0x00 });
+                    // LD A a
+                    // LD B b
+                    // ADC A B
+                    register_test(&[0x3E, a, 0x06, b, 0x88, 0x76], state);
+                }
+                // test ADC with carry-in
+                {
+                    let mut state = CpuState::new();
+                    let (res, overflow) = a.overflowing_add(b);
+                    let (res2, overflow2) = res.overflowing_add(1);
+                    let half_carry = res2 & 0x0F <= a & 0x0F;
+                    state.reg.set_a(res2);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res2 == 0 { 0x80 } else { 0x00 } | if half_carry { 0x20 } else { 0x00 } | if overflow || overflow2 { 0x10 } else { 0x00 });
+                    // LD A a
+                    // LD B b
+                    // SCF
+                    // ADC A B
+                    register_test(&[0x3E, a, 0x06, b, 0x37, 0x88, 0x76], state);
+                }
+                // test SUB and SBC (SBC with carry-in (i.e. no borrow-in) should behave the same as SUB)
+                {
+                    let mut state = CpuState::new();
+                    let (res, borrow) = a.overflowing_sub(b);
+                    let half_borrow = res & 0x0F > a & 0x0F;
+                    state.reg.set_a(res);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res == 0 { 0x80 } else { 0x00 } | 0x40 | if half_borrow { 0x00 } else { 0x20 } | if borrow { 0x00 } else { 0x10 });
+                    // LD A a
+                    // LD B b
+                    // SUB A B
+                    register_test(&[0x3E, a, 0x06, b, 0x90, 0x76], state);
+                }
+                {
+                    let mut state = CpuState::new();
+                    let (res, borrow) = a.overflowing_sub(b);
+                    let half_borrow = res & 0x0F > a & 0x0F;
+                    state.reg.set_a(res);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res == 0 { 0x80 } else { 0x00 } | 0x40 | if half_borrow { 0x00 } else { 0x20 } | if borrow { 0x00 } else { 0x10 });
+                    // LD A a
+                    // LD B b
+                    // SCF
+                    // SBC A B
+                    register_test(&[0x3E, a, 0x06, b, 0x37, 0x98, 0x76], state);
+                }
+                {
+                    let mut state = CpuState::new();
+                    let (res, borrow) = a.overflowing_sub(b);
+                    let (res2, borrow2) = res.overflowing_sub(1);
+                    let half_borrow = res2 & 0x0F >= a & 0x0F;
+                    state.reg.set_a(res2);
+                    state.reg.set_b(b);
+                    state.reg.set_f(if res2 == 0 { 0x80 } else { 0x00 } | 0x40 | if half_borrow { 0x00 } else { 0x20 } | if borrow || borrow2 { 0x00 } else { 0x10 });
+                    // LD A a
+                    // LD B b
+                    // SBC A B ; CF not set -> borrow-in
+                    register_test(&[0x3E, a, 0x06, b, 0x98, 0x76], state);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bcd_test() {
+
+        fn u8_to_bcd(int: u8) -> u8 {
+            assert!(int < 100);
+            int / 10 << 4 | int % 10
+        }
+
+        // exhaustive test, because this is easy to get wrong
+        for a in 0..100 {
+            for b in 0..100 {
+                // test ADD and ADC (should behave the same without carry-in)
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + b) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if (a + b) % 100 == 0 { 0x80 } else { 0x00 } | if a + b >= 100 { 0x10 } else { 0x00 });
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // ADD A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x80, 0x27, 0x76], state);
+                }
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + b) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if (a + b) % 100 == 0 { 0x80 } else { 0x00 } | if a + b >= 100 { 0x10 } else { 0x00 });
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // ADC A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x88, 0x27, 0x76], state);
+                }
+                // test ADC with carry-in
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + b + 1) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if (a + b + 1) % 100 == 0 { 0x80 } else { 0x00 } | if a + b + 1 >= 100 { 0x10 } else { 0x00 });
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // SCF
+                    // ADC A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x37, 0x88, 0x27, 0x76], state);
+                }
+                // test SUB and SBC (SBC with carry-in (i.e. no borrow-in) should behave the same as SUB)
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + 100 - b) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if a == b { 0x80 } else { 0x00 } | if a >= b { 0x10 } else { 0x00 } | 0x40);
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // SUB A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x90, 0x27, 0x76], state);
+                }
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + 100 - b) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if a == b { 0x80 } else { 0x00 } | if a >= b { 0x10 } else { 0x00 } | 0x40);
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // SCF
+                    // SBC A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x37, 0x98, 0x27, 0x76], state);
+                }
+                // test SBC without carry-in (i.e. with borrow-in)
+                {
+                    let mut state = CpuState::new();
+                    state.reg.set_a(u8_to_bcd((a + 99 - b) % 100));
+                    state.reg.set_b(u8_to_bcd(b));
+                    state.reg.set_f(if (a + 99 - b) % 100 == 0 { 0x80 } else { 0x00 } | if a > b { 0x10 } else { 0x00 } | 0x40);
+                    // LD A a ; already in bcd format
+                    // LD B b ; already in bcd format
+                    // SUB A B
+                    // DAA
+                    register_test(&[0x3E, u8_to_bcd(a), 0x06, u8_to_bcd(b), 0x98, 0x27, 0x76], state);
+                }
+            }
+        }
+    }
 
 
     // 16-bit ALU
@@ -1699,6 +2118,66 @@ mod tests {
             register_test(&[0x3B, 0x76], state);
         }
     }
+
+    #[test]
+    fn misc_alu_16_test() {
+        // ADD HL test
+        {
+            let mut state = CpuState::new();
+            state.reg.bc = 0xBEEF;
+            state.reg.hl = 0xBEEF + 0x1234;
+            state.reg.set_f(0x20);
+            // LD HL 0x1234
+            // LD BC 0xBEEF
+            // ADD HL BC
+            register_test(&[0x21, 0x34, 0x12, 0x01, 0xEF, 0xBE, 0x09, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.de = 0xBEEF;
+            state.reg.hl = 0xBEEF + 0x1234;
+            state.reg.set_f(0x20);
+            // LD HL 0x1234
+            // LD DE 0xBEEF
+            // ADD HL DE
+            register_test(&[0x21, 0x34, 0x12, 0x11, 0xEF, 0xBE, 0x19, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0xBEEFu16.wrapping_add(0xBEEF);
+            state.reg.set_f(0x30);
+            // LD HL 0xBEEF
+            // ADD HL HL
+            register_test(&[0x21, 0xEF, 0xBE, 0x29, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xBEEF;
+            state.reg.hl = 0xBEEF + 0x1234;
+            state.reg.set_f(0x20);
+            // LD HL 0x1234
+            // LD SP 0xBEEF
+            // ADD HL SP
+            register_test(&[0x21, 0x34, 0x12, 0x31, 0xEF, 0xBE, 0x39, 0x76], state);
+        }
+        // test add offset to sp
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDEAD + 0x42;
+            // LD SP 0xDEAD
+            // ADD SP 0x42
+            register_test(&[0x31, 0xAD, 0xDE, 0xE8, 0x42, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDEAD - 0x42;
+            state.reg.set_f(0x30);
+            // LD SP 0xDEAD
+            // ADD SP -0x42
+            register_test(&[0x31, 0xAD, 0xDE, 0xE8, 0xBE, 0x76], state);
+        }
+    }
+
 
     // 8-bit shift, rotate, bit
 
