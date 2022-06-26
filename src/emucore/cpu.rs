@@ -392,21 +392,218 @@ impl<M: MemoryIfc> Cpu<M> {
     }
 
 
-    // Jumps / Calls
+    // Jumps / Calls -- complete
 
-    // jump_rel
+    fn jump_rel(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 001cc000 / 00011000
+        // cc => condition
+        // Length: 2
+        // M-cycles: 3 / 2
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = (self.read_inc_pc() as i8) as u16;
+            }
+            2 => {
+                let take_jump = opcode == 0x18 || match opcode >> 3 & 0x03 {
+                    0 => !self.state.reg.zf(),
+                    1 => self.state.reg.zf(),
+                    2 => !self.state.reg.cf(),
+                    3 => self.state.reg.cf(),
+                    _ => panic!()
+                };
+                if take_jump {
+                    self.state.reg.pc = self.state.reg.pc.wrapping_add(self.temp16);
+                }
+                else {
+                    self.fetch();
+                }
+            }
+            3 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // jump_abs
+    fn jump_abs(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 110cc010 / 11000011
+        // cc => condition
+        // Length: 3
+        // M-cycles: 4 / 3
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.read_inc_pc() as u16;
+            }
+            2 => {
+                self.temp16 |= (self.read_inc_pc() as u16) << 8;
+            }
+            3 => {
+                let take_jump = opcode == 0xC3 || match opcode >> 3 & 0x03 {
+                    0 => !self.state.reg.zf(),
+                    1 => self.state.reg.zf(),
+                    2 => !self.state.reg.cf(),
+                    3 => self.state.reg.cf(),
+                    _ => panic!()
+                };
+                if take_jump {
+                    self.state.reg.pc = self.temp16;
+                }
+                else {
+                    self.fetch();
+                }
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // call
+    fn call(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 110cc100 / 11001101
+        // cc => condition
+        // Length: 3
+        // M-cycles: 6 / 3
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.read_inc_pc() as u16;
+            }
+            2 => {
+                self.temp16 |= (self.read_inc_pc() as u16) << 8;
+            }
+            3 => {
+                let take_jump = opcode == 0xCD || match opcode >> 3 & 0x03 {
+                    0 => !self.state.reg.zf(),
+                    1 => self.state.reg.zf(),
+                    2 => !self.state.reg.cf(),
+                    3 => self.state.reg.cf(),
+                    _ => panic!()
+                };
+                if take_jump {
+                    self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+                }
+                else {
+                    self.fetch();
+                }
+            }
+            4 => {
+                self.mem_write(self.state.reg.sp, (self.state.reg.pc >> 8) as u8);
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            5 => {
+                self.mem_write(self.state.reg.sp, self.state.reg.pc as u8);
+                self.state.reg.pc = self.temp16;
+            }
+            6 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // ret
+    fn ret_cond(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 110cc000
+        // cc => condition
+        // Length: 1
+        // M-cycles: 5 / 2
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp8 = match opcode >> 3 & 0x03 {
+                    0 => !self.state.reg.zf(),
+                    1 => self.state.reg.zf(),
+                    2 => !self.state.reg.cf(),
+                    3 => self.state.reg.cf(),
+                    _ => panic!()
+                } as u8;
+            }
+            2 => {
+                if self.temp8 != 0 {
+                    self.temp16 = self.mem_read(self.state.reg.sp) as u16;
+                    self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
+                }
+                else {
+                    self.fetch();
+                }
+            }
+            3 => {
+                self.temp16 |= (self.mem_read(self.state.reg.sp) as u16) << 8;
+                self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
+            }
+            4 => {
+                self.state.reg.pc = self.temp16;
+            }
+            5 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // reset
+    fn ret_reti(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11001001 / 11011001
+        // Length: 1
+        // M-cycles: 4
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.temp16 = self.mem_read(self.state.reg.sp) as u16;
+                self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
+            }
+            2 => {
+                self.temp16 |= (self.mem_read(self.state.reg.sp) as u16) << 8;
+                self.state.reg.sp = self.state.reg.sp.wrapping_add(1);
+            }
+            3 => {
+                if opcode == 0xD9 {
+                    self.state.ime = true;
+                }
+                self.state.reg.pc = self.temp16;
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // reti
+    fn reset(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11ttt111
+        // ttt => target
+        // Length: 1
+        // M-cycles: 4
+        // Flags: - - - -
+        match mcycle {
+            1 => {
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            2 => {
+                self.mem_write(self.state.reg.sp, (self.state.reg.pc >> 8) as u8);
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            3 => {
+                self.mem_write(self.state.reg.sp, self.state.reg.pc as u8);
+                self.state.reg.pc = (opcode & 0x1C) as u16;
+            }
+            4 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
 
-    // jump_hl
+    fn jump_hl(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        // Opcode: 11101010
+        // Length: 1
+        // M-cycles: 1
+        // Flags: - - - -
+        assert!(mcycle == 1);
+        self.state.reg.pc = self.state.reg.hl;
+        self.fetch();
+    }
 
 
     // 8-bit load instructions -- complete
@@ -1081,38 +1278,38 @@ impl<M: MemoryIfc> Cpu<M> {
 
     #[cfg_attr(rustfmt, rustfmt_skip)]
     const OPCODE_DISPATCH: [InstructionFn<M>; 256] = [
-        Cpu::nop,         Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::save_sp,     Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::stop,        Cpu::ld_16_imm, Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_rr, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::invalid,     Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
-        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
-        Cpu::invalid,     Cpu::ld_16_imm, Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
-        Cpu::invalid,     Cpu::add_hl,    Cpu::ld_8_hl, Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::ccf,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
-        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,    Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::alu,         Cpu::alu,       Cpu::alu,     Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
-        Cpu::invalid,     Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::invalid,     Cpu::invalid,   Cpu::invalid, Cpu::prefix,     Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::invalid,     Cpu::pop,       Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::invalid,     Cpu::invalid,   Cpu::invalid, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,   Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::add_sp_offs, Cpu::invalid,   Cpu::ld_8_aa, Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
-        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,   Cpu::di_ei,      Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::invalid,
-        Cpu::ld_sp_offs,  Cpu::load_sp,   Cpu::ld_8_aa, Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::invalid,
+        Cpu::nop,         Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::save_sp,     Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::stop,        Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::jump_rel,    Cpu::ld_16_imm, Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
+        Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
+        Cpu::jump_rel,    Cpu::ld_16_imm, Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
+        Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::ccf,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::halt,     Cpu::ld_8,
+        Cpu::ld_8,        Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,       Cpu::ld_8,      Cpu::ld_8,      Cpu::ld_8,     Cpu::ld_8,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::alu,         Cpu::alu,       Cpu::alu,      Cpu::alu,        Cpu::alu,       Cpu::alu,       Cpu::alu,      Cpu::alu,
+        Cpu::ret_cond,    Cpu::pop,       Cpu::jump_abs, Cpu::jump_abs,   Cpu::call,      Cpu::push,      Cpu::alu,      Cpu::reset,
+        Cpu::ret_cond,    Cpu::ret_reti,  Cpu::jump_abs, Cpu::prefix,     Cpu::call,      Cpu::call,      Cpu::alu,      Cpu::reset,
+        Cpu::ret_cond,    Cpu::pop,       Cpu::jump_abs, Cpu::invalid,    Cpu::call,      Cpu::push,      Cpu::alu,      Cpu::reset,
+        Cpu::ret_cond,    Cpu::ret_reti,  Cpu::jump_abs, Cpu::invalid,    Cpu::call,      Cpu::invalid,   Cpu::alu,      Cpu::reset,
+        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,    Cpu::invalid,    Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::reset,
+        Cpu::add_sp_offs, Cpu::jump_hl,   Cpu::ld_8_aa,  Cpu::invalid,    Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::reset,
+        Cpu::ldh_8,       Cpu::pop,       Cpu::ldh_8,    Cpu::di_ei,      Cpu::invalid,   Cpu::push,      Cpu::alu,      Cpu::reset,
+        Cpu::ld_sp_offs,  Cpu::load_sp,   Cpu::ld_8_aa,  Cpu::di_ei,      Cpu::invalid,   Cpu::invalid,   Cpu::alu,      Cpu::reset,
     ];
     
     #[cfg_attr(rustfmt, rustfmt_skip)]
@@ -1218,6 +1415,167 @@ mod tests {
 
 
     // Jumps / Calls
+
+    #[test]
+    fn jump_test() {
+        // unconditional jumps
+        {
+            // JR 0x04
+            // ...
+            // HALT
+            register_test(&[0x18, 0x04, 0xFD, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            // JP 0x06
+            // ...
+            // HALT
+            register_test(&[0xC3, 0x06, 0x00, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.hl = 0x0006;
+            // LD HL 0x0006
+            // JP HL
+            // ...
+            // HALT
+            register_test(&[0x21, 0x06, 0x00, 0xE9, 0xFD, 0xFD, 0x76], state);
+        }
+        // conditional jumps (relative)
+        {
+            // JR NZ 0x04
+            // ...
+            // HALT
+            register_test(&[0x20, 0x04, 0xFD, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x80);
+            // XOR A
+            // JR NZ 0x04
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0xAF, 0x20, 0x03, 0x18, 0x02, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x80);
+            // XOR A
+            // JR Z 0x04
+            // ...
+            // HALT
+            register_test(&[0xAF, 0x28, 0x04, 0xFD, 0xFD, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            // JR Z 0x02
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0x28, 0x02, 0x18, 0x02, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            // JR NC 0x04
+            // ...
+            // HALT
+            register_test(&[0x30, 0x04, 0xFD, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            // SCF
+            // JR NC 0x04
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0x37, 0x30, 0x03, 0x18, 0x02, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            // SCF
+            // JR C 0x04
+            // ...
+            // HALT
+            register_test(&[0x37, 0x38, 0x04, 0xFD, 0xFD, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            // JR C 0x02
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0x38, 0x02, 0x18, 0x02, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        // conditional jumps (absolute)
+        {
+            // JP NZ 0x0006
+            // ...
+            // HALT
+            register_test(&[0xC2, 0x06, 0x00, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x80);
+            // XOR A
+            // JP NZ 0x0006
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0xAF, 0xC2, 0x06, 0x00, 0x18, 0x02, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x80);
+            // XOR A
+            // JP Z 0x0006
+            // ...
+            // HALT
+            register_test(&[0xAF, 0xCA, 0x06, 0x00, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            // JP Z 0x0006
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0xCA, 0x06, 0x00, 0x18, 0x02, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            // JP NC 0x04
+            // ...
+            // HALT
+            register_test(&[0xD2, 0x06, 0x00, 0xFD, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            // SCF
+            // JP NC 0x0006
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0x37, 0xD2, 0x06, 0x00, 0x18, 0x02, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            let mut state = CpuState::new();
+            state.reg.set_f(0x10);
+            // SCF
+            // JP C 0x0006
+            // ...
+            // HALT
+            register_test(&[0x37, 0xDA, 0x06, 0x00, 0xFD, 0xFD, 0x76], state);
+        }
+        {
+            // JP C 0x02
+            // JR 0x02
+            // ...
+            // HALT
+            register_test(&[0xDA, 0x06, 0x00, 0x18, 0x02, 0xFD, 0xFD, 0x76], CpuState::new());
+        }
+    }
+
+    #[test]
+    fn call_ret_test() {
+        //TODO
+    }
 
 
     // 8-bit load instructions
