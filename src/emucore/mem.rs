@@ -2,6 +2,9 @@
 pub trait MemoryIfc {
     fn read(&self, addr: u16) -> u8;
     fn write(&mut self, addr: u16, val: u8);
+
+    fn get_cr(&self) -> &ControlRegisters;
+    fn get_cr_mut(&mut self) -> &mut ControlRegisters;
 }
 
 
@@ -9,6 +12,7 @@ pub struct GBMemory {
     wram: Box<[u8; 8192]>,
     vram: Box<[u8; 8192]>,
     oam: Box<[u8; 160]>,
+    bootrom: Option<Box<[u8; 256]>>,
     cartridge: Cartridge,
     control_registers: ControlRegisters
 }
@@ -19,6 +23,7 @@ impl GBMemory {
             wram: Box::new([0; 8192]),
             vram: Box::new([0; 8192]),
             oam: Box::new([0; 160]),
+            bootrom: None,
             cartridge,
             control_registers: ControlRegisters::new()
         }
@@ -27,6 +32,11 @@ impl GBMemory {
 
 impl MemoryIfc for GBMemory {
     fn read(&self, addr: u16) -> u8 {
+        if let Some(ref rom) = self.bootrom {
+            if !self.control_registers.bootrom_disable && addr < 0x0100 {
+                return rom[addr as usize]
+            }
+        }
         if addr < 0x8000 {
             self.cartridge.read_rom(addr)
         }
@@ -46,7 +56,7 @@ impl MemoryIfc for GBMemory {
             0 // empty memory region
         }
         else {
-            self.control_registers.read_cr(addr & 0x00FF)
+            self.control_registers.read_cr(addr)
         }
     }
 
@@ -72,6 +82,14 @@ impl MemoryIfc for GBMemory {
         else {
             self.control_registers.write_cr(addr & 0x00FF, val)
         }
+    }
+
+    fn get_cr(&self) -> &ControlRegisters {
+        &self.control_registers
+    }
+
+    fn get_cr_mut(&mut self) -> &mut ControlRegisters {
+        &mut self.control_registers
     }
 }
 
@@ -117,40 +135,43 @@ impl Cartridge {
     }
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ControlRegisters {
     extra_ram: Box<[u8; 127]>,
-    cpu_cr: CpuControlRegisters,
-    ppu_cr: PpuControlRegisters,
-    audio_cr: AudioControlRegisters
+    pub interrupt_flag: u8,
+    pub interrupt_enable: u8,
+    bootrom_disable: bool,
 }
 
 impl ControlRegisters {
     pub fn new() -> ControlRegisters {
         ControlRegisters {
             extra_ram: Box::new([0; 127]),
-            cpu_cr: CpuControlRegisters {  },
-            ppu_cr: PpuControlRegisters {  },
-            audio_cr: AudioControlRegisters {  },
+            interrupt_flag: 0xE0,
+            interrupt_enable: 0,
+            bootrom_disable: false,
         }
     }
 
-    fn read_cr(&self, _addr: u16) -> u8 {
-        0
+    fn read_cr(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0xFEFF => panic!(),
+            0xFF0F          => self.interrupt_flag,
+            0xFF50          => self.bootrom_disable as u8,
+            0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize],
+            0xFFFF          => self.interrupt_enable,
+            _               => 0xFF,
+        }
     }
 
-    fn write_cr(&mut self, _addr: u16, _val: u8) {
-
+    fn write_cr(&mut self, addr: u16, val: u8) {
+        match addr {
+            0x0000..=0xFEFF => panic!(),
+            0xFF0F          => self.interrupt_flag = val & 0x1F,
+            0xFF50          => self.bootrom_disable |= val & 0x01 != 0,
+            0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize] = val,
+            0xFFFF          => self.interrupt_enable = val & 0x1F,
+            _ => {},
+        }
     }
-}
-
-pub struct CpuControlRegisters {
-
-}
-
-pub struct PpuControlRegisters {
-
-}
-
-pub struct AudioControlRegisters {
-
 }

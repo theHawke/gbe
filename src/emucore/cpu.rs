@@ -1,4 +1,5 @@
 use super::mem::MemoryIfc;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -218,6 +219,15 @@ type Opcode = u8;
 type InstructionFn<M> = fn(&mut Cpu<M>, Opcode, MCycle) -> ();
 type MCycle = u8;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterruptType {
+    VBlank = 0,
+    LcdStat = 1,
+    Timer = 2,
+    Serial = 3,
+    JoyPad = 4,
+}
+
 impl<M: MemoryIfc> Cpu<M> {
     pub fn new(mem: Rc<RefCell<M>>) -> Cpu<M> {
         Cpu {
@@ -231,7 +241,7 @@ impl<M: MemoryIfc> Cpu<M> {
         }
     }
 
-    pub fn tick(&mut self) -> () {
+    pub fn tick(&mut self) {
         match self.state.state {
             State::Running => {
                 (self.dispatch)(self, self.opcode, self.mcycle);
@@ -243,6 +253,18 @@ impl<M: MemoryIfc> Cpu<M> {
         }
 
         self.state.display();
+    }
+
+    pub fn raise_interrupt(&mut self, inter_type: InterruptType) {
+        let bit = 1 << (inter_type as u8);
+        let mut mem = self.mem.borrow_mut();
+        mem.get_cr_mut().interrupt_flag |= bit;
+        if mem.get_cr().interrupt_enable & bit != 0 {
+            // resume from HALT and STOP modes
+            if self.state.state == State::Halt || self.state.state == State::Stop && inter_type == InterruptType::JoyPad {
+                self.state.state = State::Running;
+            }
+        }
     }
 
     //
@@ -300,9 +322,56 @@ impl<M: MemoryIfc> Cpu<M> {
         ret
     }
 
+    fn check_interrupts(&self) -> bool {
+        let mem = self.mem.borrow();
+        let cr = mem.get_cr();
+        self.state.ime && cr.interrupt_flag & cr.interrupt_enable & 0x1F != 0
+    }
+
+    fn acknowledeg_interrupt(&mut self, _opcode: Opcode, mcycle: MCycle) {
+        match mcycle {
+            1 => {
+                self.state.ime = false;
+            }
+            2 => {
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            3 => {
+                self.mem_write(self.state.reg.sp, (self.state.reg.pc >> 8) as u8);
+                self.state.reg.sp = self.state.reg.sp.wrapping_sub(1);
+            }
+            4 => {
+                self.mem_write(self.state.reg.sp, self.state.reg.pc as u8);
+
+                let mut mem = self.mem.borrow_mut();
+                let cr = mem.get_cr_mut();
+                let active_interrupts = cr.interrupt_flag & cr.interrupt_enable & 0x1F;
+                assert!(active_interrupts != 0);
+                let bit = active_interrupts.trailing_zeros() as u8;
+
+                // acknowledge interrupt
+                cr.interrupt_flag &= !bit;
+
+                // jump PC
+                self.state.reg.pc = 0x0040 + (bit as u16) << 3;
+            }
+            5 => {
+                self.fetch();
+            }
+            _ => panic!()
+        }
+    }
+
     fn fetch(&mut self) {
-        self.opcode = self.read_inc_pc();
-        self.dispatch = Cpu::OPCODE_DISPATCH[self.opcode as usize];
+
+        if self.check_interrupts() {
+            self.opcode = 0xFD; // some invalid opcode
+            self.dispatch = Cpu::acknowledeg_interrupt;
+        }
+        else {
+            self.opcode = self.read_inc_pc();
+            self.dispatch = Cpu::OPCODE_DISPATCH[self.opcode as usize];
+        }
         self.mcycle = 0;
     }
 
@@ -344,7 +413,7 @@ impl<M: MemoryIfc> Cpu<M> {
 
         assert!(mcycle == 1);
 
-        self.state.reg.pc += 1;
+        self.state.reg.pc = self.state.reg.pc.wrapping_add(1);
         self.state.state = State::Stop;
 
         self.fetch();
@@ -1513,11 +1582,12 @@ impl<M: MemoryIfc> Cpu<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emucore::mem::ControlRegisters;
 
     use std::collections::HashMap;
     
     #[derive(Clone, PartialEq, Eq, Debug)]
-    struct SparseMem (HashMap<u16, u8>);
+    struct SparseMem (HashMap<u16, u8>, ControlRegisters);
 
     fn with_address(instr: &[u8]) -> impl Iterator<Item = (u16, u8)> + '_ {
         (0..).zip(instr.iter().copied())
@@ -1527,7 +1597,7 @@ mod tests {
         where I : IntoIterator<Item=(u16, u8)>
     {
         fn from(iter: I) -> SparseMem {
-            SparseMem(HashMap::from_iter(iter))
+            SparseMem(HashMap::from_iter(iter), ControlRegisters::new())
         }
     }
 
@@ -1538,6 +1608,14 @@ mod tests {
 
         fn write(&mut self, addr: u16, val: u8) {
             self.0.insert(addr, val);
+        }
+
+        fn get_cr(&self) -> &ControlRegisters {
+            &self.1
+        }
+
+        fn get_cr_mut(&mut self) -> &mut ControlRegisters {
+            &mut self.1
         }
     }
 
@@ -1573,6 +1651,11 @@ mod tests {
     }
 
     // Misc / Control instructions
+
+    #[test]
+    fn interrupt_test() {
+        todo!();
+    }
 
 
     // Jumps / Calls
@@ -1745,7 +1828,7 @@ mod tests {
             let mut state = CpuState::new();
             state.reg.sp = 0xDFFE;
             register_test(instructions, state);
-            let mem = SparseMem(HashMap::from([(0xDFFE, 0x06), (0xDFFF, 0x00)]));
+            let mem = SparseMem::from([(0xDFFE, 0x06), (0xDFFF, 0x00)]);
             memory_test(instructions, mem);
         }
         {
@@ -1802,7 +1885,7 @@ mod tests {
             register_test(&[0x2E, 0xAA, 0x76], state);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xFFFF, 0xAA)]));
+            let mem = SparseMem::from([(0xFFFF, 0xAA)]);
             // DEC HL
             // LD (HL) 0xAA
             memory_test(&[0x2B, 0x36, 0xAA, 0x76], mem);
@@ -1840,7 +1923,7 @@ mod tests {
             }
             {
                 let addr = if i == 4 { 0xAAAA } else { 0x00AA };
-                let mem = SparseMem(HashMap::from([(addr, 0xAA)]));
+                let mem = SparseMem::from([(addr, 0xAA)]);
                 let prep_instr = 0x06 | i << 3;
                 let load_instr = 0x40 | 6 << 3 | i;
                 // LD L 0xAA
@@ -1855,28 +1938,28 @@ mod tests {
     fn load_memory_8_test() {
         // test memory stores
         {
-            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            let mem = SparseMem::from([(0xBEEF, 0xAA)]);
             // LD A 0xAA
             // LD BC 0xBEEF
             // LD (BC) A
             memory_test(&[0x3E, 0xAA, 0x01, 0xEF, 0xBE, 0x02, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            let mem = SparseMem::from([(0xBEEF, 0xAA)]);
             // LD A 0xAA
             // LD DE 0xBEEF
             // LD (DE) A
             memory_test(&[0x3E, 0xAA, 0x11, 0xEF, 0xBE, 0x12, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            let mem = SparseMem::from([(0xBEEF, 0xAA)]);
             // LD A 0xAA
             // LD HL 0xBEEF
             // LD (HL+) A
             memory_test(&[0x3E, 0xAA, 0x21, 0xEF, 0xBE, 0x22, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xBEEF, 0xAA)]));
+            let mem = SparseMem::from([(0xBEEF, 0xAA)]);
             // LD A 0xAA
             // LD HL 0xBEEF
             // LD (HL-) A
@@ -1939,7 +2022,7 @@ mod tests {
         }
         // immediate address load/store
         {
-            let mem = SparseMem(HashMap::from([(0xDEAD, 0xAA)]));
+            let mem = SparseMem::from([(0xDEAD, 0xAA)]);
             // LD A 0xAA
             // LD (0xDEAD) A
             memory_test(&[0x3E, 0xAA, 0xEA, 0xAD, 0xDE, 0x76], mem);
@@ -1955,13 +2038,13 @@ mod tests {
         }
         // High memory load/store
         {
-            let mem = SparseMem(HashMap::from([(0xFF42, 0xAA)]));
+            let mem = SparseMem::from([(0xFF42, 0xAA)]);
             // LD A 0xAA
             // LDH (0x42) A
             memory_test(&[0x3E, 0xAA, 0xE0, 0x42, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xFF42, 0xAA)]));
+            let mem = SparseMem::from([(0xFF42, 0xAA)]);
             // LD A 0xAA
             // LD C 0x42
             // LDH (C) A
@@ -2021,28 +2104,28 @@ mod tests {
     fn stack_test() {
         // test PUSH
         {
-            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            let mem = SparseMem::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]);
             // LD SP 0xE000
             // LD BC 0xBEEF
             // PUSH BC
             memory_test(&[0x31, 0x00, 0xE0, 0x01, 0xEF, 0xBE, 0xC5, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            let mem = SparseMem::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]);
             // LD SP 0xE000
             // LD DE 0xBEEF
             // PUSH DE
             memory_test(&[0x31, 0x00, 0xE0, 0x11, 0xEF, 0xBE, 0xD5, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]));
+            let mem = SparseMem::from([(0xDFFE, 0xEF), (0xDFFF, 0xBE)]);
             // LD SP 0xE000
             // LD BC 0xBEEF
             // PUSH BC
             memory_test(&[0x31, 0x00, 0xE0, 0x21, 0xEF, 0xBE, 0xE5, 0x76], mem);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xDFFE, 0x10), (0xDFFF, 0xAA)]));
+            let mem = SparseMem::from([(0xDFFE, 0x10), (0xDFFF, 0xAA)]);
             // LD SP 0xE000
             // LD A 0xAA
             // SCF
@@ -2088,7 +2171,7 @@ mod tests {
         }
         // test save SP to addr16
         {
-            let mem = SparseMem(HashMap::from([(0xDEAD, 0x00), (0xDEAE, 0xE0)]));
+            let mem = SparseMem::from([(0xDEAD, 0x00), (0xDEAE, 0xE0)]);
             // LD SP 0xE000
             // LD (0xDEAD) SP
             memory_test(&[0x31, 0x00, 0xE0, 0x08, 0xAD, 0xDE, 0x76], mem);
@@ -2260,7 +2343,7 @@ mod tests {
             register_test(&[0x2E, 0x01, 0x2D, 0x76], state);
         }
         {
-            let mem = SparseMem(HashMap::from([(0xFFFF, 0x01), (0xFFFE, 0xFF), (0xFFFD, 0), (0xFFFC, 0)]));
+            let mem = SparseMem::from([(0xFFFF, 0x01), (0xFFFE, 0xFF), (0xFFFD, 0), (0xFFFC, 0)]);
             // DEC HL
             // INC (HL)
             //
@@ -2755,7 +2838,7 @@ mod tests {
                         register_test(&[prepare_instr, value, 0x37, 0xCB, op_instr, 0x76], state);
                     }
                     else {
-                        let mem = SparseMem(HashMap::from([(0xDEAD, result)]));
+                        let mem = SparseMem::from([(0xDEAD, result)]);
                         // LD HL 0xDEAD
                         // LD (HL) value
                         // SCF
@@ -2819,13 +2902,13 @@ mod tests {
                 }
                 else {
                     {
-                        let mem = SparseMem(HashMap::from([(0xDEAD, 0x01 << bit)]));
+                        let mem = SparseMem::from([(0xDEAD, 0x01 << bit)]);
                         // LD HL 0xDEAD
                         // SET bit (HL)
                         memory_test(&[0x21, 0xAD, 0xDE, 0xCB, set_instr, 0x76], mem);
                     }
                     {
-                        let mem = SparseMem(HashMap::from([(0xDEAD, !(0x01 << bit))]));
+                        let mem = SparseMem::from([(0xDEAD, !(0x01 << bit))]);
                         // LD HL 0xDEAD
                         // LD (HL) 0xFF
                         // RES bit (HL)
