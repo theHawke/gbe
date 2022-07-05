@@ -386,9 +386,18 @@ impl<M: MemoryIfc> Cpu<M> {
         assert!(mcycle == 1);
 
         let enable = opcode >> 3 != 0;
-        self.state.ime = enable;
+
+        // disable takes place before fetch/interrupt acknowledge
+        if !enable {
+            self.state.ime = false;
+        }
 
         self.fetch();
+
+        // enable only takes effect for next instruction
+        if enable {
+            self.state.ime = true;
+        }
     }
 
 
@@ -1274,14 +1283,166 @@ impl<M: MemoryIfc> Cpu<M> {
 
 
     // 8-bit shift, rotate, bit
-    // ...
+    
+    fn rotate_shift(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: (PREFIX) 00ooorrr
+        // oo => op (RLC, RRC, RL, RR, SLA, SRA, SWAP, SRL)
+        // rrr => register / (HL) memory
+        // Length: 2 / 1 (1-Byte A register versions)
+        // M-cycles: 2 / 4 ((HL) memory versions) / 1 (1-Byte A register verisons)
+        // FLags: Z 0 0 C
+        let op = opcode >> 3 & 0x07;
+        let target = opcode & 0x07;
+
+        // load operand
+        if target == 0x06 {
+            if mcycle == 1 {
+                self.temp8 = self.mem_read(self.state.reg.hl);
+                return;
+            }
+            else if mcycle == 3 {
+                self.fetch();
+                return;
+            }
+        }
+        else {
+            self.temp8 = self.reg_8_read(target);
+        }
+
+        // execute op
+        let (carry, result) = match op {
+            0 => (
+                // RLC
+                self.temp8 & 0x80 != 0,
+                self.temp8.rotate_left(1)
+            ),
+            1 => (
+                // RRC
+                self.temp8 & 0x01 != 0,
+                self.temp8.rotate_right(1)
+            ),
+            2 => (
+                // RL
+                self.temp8 & 0x80 != 0,
+                self.temp8 << 1 | self.state.reg.cf() as u8
+            ),
+            3 => (
+                // RR
+                self.temp8 & 0x01 != 0,
+                self.temp8 >> 1 | (self.state.reg.cf() as u8) << 7
+            ),
+            4 => (
+                // SLA
+                self.temp8 & 0x80 != 0,
+                self.temp8 << 1
+            ),
+            5 => (
+                // SRA
+                self.temp8 & 0x01 != 0,
+                ((self.temp8 as i8) >> 1) as u8
+            ),
+            6 => (
+                // SWAP
+                false,
+                self.temp8 >> 4 | self.temp8 << 4
+            ),
+            7 => (
+                // SRL
+                self.temp8 & 0x01 != 0,
+                self.temp8 >> 1
+            ),
+            _ => panic!(),
+        };
+        
+        // write back
+        self.state.reg.update_flags(0x00, 0x60, if result == 0 { 0x80 } else { 0x00 } | if carry { 0x10 } else { 0x00 }, 0x90);
+        if target == 0x06 {
+            self.mem_write(self.state.reg.hl, result);
+        }
+        else {
+            self.reg_8_write(target, result);
+            self.fetch();
+        }
+    }
+
+    fn bit_test(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: (PREFIX) 01bbbrrr
+        // bbb => bit select
+        // rrr => target (register / (HL) memory)
+        // Length: 2
+        // M-cycles: 2 / 3 ((HL) memory version)
+
+        let bit = opcode >> 3 & 0x07;
+        let target = opcode & 0x07;
+
+        // load operand
+        if target == 0x06 {
+            if mcycle == 1 {
+                self.temp8 = self.mem_read(self.state.reg.hl);
+                return;
+            }
+        }
+        else {
+            self.temp8 = self.reg_8_read(target);
+        }
+
+        // test bit
+        let mask = 0x01 << bit;
+        let test = self.temp8 & mask != 0;
+        self.state.reg.update_flags(0x20, 0x40, (test as u8) << 7, 0x80);
+
+        self.fetch();
+    }
+
+    fn bit_re_set(&mut self, opcode: Opcode, mcycle: MCycle) {
+        // Opcode: (PREFIX) 1sbbbrrr
+        // s => 0 -> reset, 1 -> set
+        // bbb => bit select
+        // rrr => target (register / (HL) memory)
+        // Length: 2
+        // M-cycles: 2 / 3 ((HL) memory version)
+
+        let set = opcode >> 6 & 0x01 != 0;
+        let bit = opcode >> 3 & 0x07;
+        let target = opcode & 0x07;
+
+        // load operand
+        if target == 0x06 {
+            if mcycle == 1 {
+                self.temp8 = self.mem_read(self.state.reg.hl);
+                return;
+            }
+            else if mcycle == 3 {
+                self.fetch();
+                return;
+            }
+        }
+        else {
+            self.temp8 = self.reg_8_read(target);
+        }
+
+        let result = if set {
+            self.temp8 | 0x01 << bit 
+        } else { 
+            self.temp8 & !(0x01 << bit)
+        };
+
+        if target == 0x06 {
+            self.mem_write(self.state.reg.hl, result);
+        }
+        else {
+            self.reg_8_write(target, result);
+            self.fetch();
+        }
+
+    }
 
     #[cfg_attr(rustfmt, rustfmt_skip)]
     const OPCODE_DISPATCH: [InstructionFn<M>; 256] = [
-        Cpu::nop,         Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::save_sp,     Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::stop,        Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
-        Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::invalid,
+        Cpu::nop,         Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::rotate_shift,
+        Cpu::save_sp,     Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::rotate_shift,
+        Cpu::stop,        Cpu::ld_16_imm, Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::rotate_shift,
+        Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_rr,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::rotate_shift,
         Cpu::jump_rel,    Cpu::ld_16_imm, Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::daa,
         Cpu::jump_rel,    Cpu::add_hl,    Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::cpl,
         Cpu::jump_rel,    Cpu::ld_16_imm, Cpu::ld_8_hl,  Cpu::inc_dec_16, Cpu::inc_dec_8, Cpu::inc_dec_8, Cpu::ld_8_imm, Cpu::scf,
@@ -1314,38 +1475,38 @@ impl<M: MemoryIfc> Cpu<M> {
     
     #[cfg_attr(rustfmt, rustfmt_skip)]
     const OPCODE_DISPATCH_PREFIX: [InstructionFn<M>; 256] = [
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
-        Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid, Cpu::invalid,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift, Cpu::rotate_shift,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,     Cpu::bit_test,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
+        Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,   Cpu::bit_re_set,  Cpu::bit_re_set,   Cpu::bit_re_set,
     ];
 }
 
@@ -1574,7 +1735,34 @@ mod tests {
 
     #[test]
     fn call_ret_test() {
-        //TODO
+        {
+            // LD SP 0xE000
+            // CALL test
+            // ...
+            // test:
+            // HALT
+            let instructions = &[0x31, 0x00, 0xE0, 0xCD, 0x08, 0x00, 0xFD, 0xFD, 0x76];
+            let mut state = CpuState::new();
+            state.reg.sp = 0xDFFE;
+            register_test(instructions, state);
+            let mem = SparseMem(HashMap::from([(0xDFFE, 0x06), (0xDFFF, 0x00)]));
+            memory_test(instructions, mem);
+        }
+        {
+            // LD SP 0xE000
+            // CALL test
+            // JR end
+            // ...
+            // test:
+            // RET
+            // ...
+            // end:
+            // HALT
+            let instructions = &[0x31, 0x00, 0xE0, 0xCD, 0x0A, 0x00, 0x18, 0x05, 0xFD, 0xFD, 0xC9, 0xFD, 0xFD, 0x76];
+            let mut state = CpuState::new();
+            state.reg.sp = 0xE000;
+            register_test(instructions, state);
+        }
     }
 
 
@@ -2538,5 +2726,114 @@ mod tests {
 
 
     // 8-bit shift, rotate, bit
+
+    #[test]
+    fn rotate_shift_test() {
+        for value in [0x55u8, 0xF0] {
+            for op in 0..0x08 {
+                let (carry, result) = match op {
+                    0 => (value & 0x80 != 0, value.rotate_left(1)),
+                    1 => (value & 0x01 != 0, value.rotate_right(1)),
+                    2 => (value & 0x80 != 0, value << 1 | 0x01),
+                    3 => (value & 0x01 != 0, value >> 1 | 0x80),
+                    4 => (value & 0x80 != 0, value << 1),
+                    5 => (value & 0x01 != 0, ((value as i8) >> 1) as u8),
+                    6 => (false, value >> 4 | value << 4),
+                    7 => (value & 0x01 != 0, value >> 1),
+                    _ => panic!(),
+                };
+                for target in 0..0x08 {
+                    let prepare_instr = 0x06 | target << 3;
+                    let op_instr = 0x00 | op << 3 | target;
+                    if target != 6 {
+                        let mut state = CpuState::new();
+                        state.reg.r8_write(target, result);
+                        state.reg.update_flags(0x00, 0x00, if result == 0 { 0x80 } else { 0x00 } | if carry { 0x10 } else { 0x00 }, 0x90);
+                        // LD reg value
+                        // SCF
+                        // op reg
+                        register_test(&[prepare_instr, value, 0x37, 0xCB, op_instr, 0x76], state);
+                    }
+                    else {
+                        let mem = SparseMem(HashMap::from([(0xDEAD, result)]));
+                        // LD HL 0xDEAD
+                        // LD (HL) value
+                        // SCF
+                        // op (HL)
+                        memory_test(&[0x21, 0xAD, 0xDE, prepare_instr, value, 0x37, 0xCB, op_instr, 0x76], mem);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_test_test() {
+        for value in [0x55, 0xAA, 0xF0, 0x0F] {
+            for bit in 0..8 {
+                for target in 0..8 {
+                    let prepare_instr = 0x06 | target << 3;
+                    let test_instr = 0x40 | bit << 3 | target;
+                    let mut state = CpuState::new();
+                    if target != 0x06 {
+                        state.reg.r8_write(target, value);
+                    }
+                    else {
+                        state.reg.hl = 0xDEAD;
+                    }
+                    state.reg.update_flags(0x20, 0x00, if value & 0x01 << bit != 0 { 0x80 } else { 0x00 }, 0x80);
+                    // LD reg value
+                    // BIT bit reg
+                    let instructions: Vec<u8> = if target != 0x06 {
+                        Vec::from([prepare_instr, value, 0xCB, test_instr, 0x76])
+                    } else {
+                        Vec::from([0x21, 0xAD, 0xDE, prepare_instr, value, 0xCB, test_instr, 0x76])
+                    };
+                    register_test(instructions.as_ref(), state);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bit_set_reset_test() {
+        for bit in 0..8 {
+            for target in 0..8 {
+                let set_instr = 0xC0 | bit << 3 | target;
+                let reset_instr = 0x80 | bit << 3 | target;
+                let load_instr = target << 3 | 0x06;
+                if target != 6 {
+                    {
+                        let mut state = CpuState::new();
+                        state.reg.r8_write(target, 0x01 << bit);
+                        // SET bit reg
+                        register_test(&[0xCB, set_instr, 0x76], state);
+                    }
+                    {
+                        let mut state = CpuState::new();
+                        state.reg.r8_write(target, !(0x01 << bit));
+                        // LD reg 0xFF
+                        // RES bit reg
+                        register_test(&[load_instr, 0xFF, 0xCB, reset_instr, 0x76], state);
+                    }
+                }
+                else {
+                    {
+                        let mem = SparseMem(HashMap::from([(0xDEAD, 0x01 << bit)]));
+                        // LD HL 0xDEAD
+                        // SET bit (HL)
+                        memory_test(&[0x21, 0xAD, 0xDE, 0xCB, set_instr, 0x76], mem);
+                    }
+                    {
+                        let mem = SparseMem(HashMap::from([(0xDEAD, !(0x01 << bit))]));
+                        // LD HL 0xDEAD
+                        // LD (HL) 0xFF
+                        // RES bit (HL)
+                        memory_test(&[0x21, 0xAD, 0xDE, load_instr, 0xFF, 0xCB, reset_instr, 0x76], mem);
+                    }
+                }
+            }
+        }
+    }
 
 }
