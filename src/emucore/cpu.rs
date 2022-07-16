@@ -3,6 +3,19 @@ use super::mem::MemoryIfc;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum InterruptType {
+    VBlank = 0,
+    LcdStat = 1,
+    Timer = 2,
+    Serial = 3,
+    JoyPad = 4,
+}
+
+pub trait Interruptible {
+    fn raise_interrupt(&mut self, inter_type: InterruptType);
+}
+
 pub struct Cpu<M: MemoryIfc> {
     state: CpuState,
     mem: Rc<RefCell<M>>,
@@ -219,13 +232,18 @@ type Opcode = u8;
 type InstructionFn<M> = fn(&mut Cpu<M>, Opcode, MCycle) -> ();
 type MCycle = u8;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum InterruptType {
-    VBlank = 0,
-    LcdStat = 1,
-    Timer = 2,
-    Serial = 3,
-    JoyPad = 4,
+impl<M: MemoryIfc> Interruptible for Cpu<M> {
+    fn raise_interrupt(&mut self, inter_type: InterruptType) {
+        let bit = 1 << (inter_type as u8);
+        let mut mem = self.mem.borrow_mut();
+        mem.get_cr_mut().interrupt_flag |= bit;
+        if mem.get_cr().interrupt_enable & bit != 0 {
+            // resume from HALT and STOP modes
+            if self.state.state == State::Halt || self.state.state == State::Stop && inter_type == InterruptType::JoyPad {
+                self.state.state = State::Running;
+            }
+        }
+    }
 }
 
 impl<M: MemoryIfc> Cpu<M> {
@@ -253,18 +271,6 @@ impl<M: MemoryIfc> Cpu<M> {
         }
 
         self.state.display();
-    }
-
-    pub fn raise_interrupt(&mut self, inter_type: InterruptType) {
-        let bit = 1 << (inter_type as u8);
-        let mut mem = self.mem.borrow_mut();
-        mem.get_cr_mut().interrupt_flag |= bit;
-        if mem.get_cr().interrupt_enable & bit != 0 {
-            // resume from HALT and STOP modes
-            if self.state.state == State::Halt || self.state.state == State::Stop && inter_type == InterruptType::JoyPad {
-                self.state.state = State::Running;
-            }
-        }
     }
 
     //
