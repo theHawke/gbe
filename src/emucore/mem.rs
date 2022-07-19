@@ -142,6 +142,7 @@ pub struct ControlRegisters {
     pub interrupt_flag: u8,
     pub interrupt_enable: u8,
     bootrom_disable: bool,
+    pub ppu_cr: PpuCR,
 }
 
 impl ControlRegisters {
@@ -151,6 +152,7 @@ impl ControlRegisters {
             interrupt_flag: 0xE0,
             interrupt_enable: 0,
             bootrom_disable: false,
+            ppu_cr: PpuCR::new(),
         }
     }
 
