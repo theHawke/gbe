@@ -240,6 +240,14 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
         }
     }
 
+    fn render_frame(&mut self) {
+        for y in 0..LDC_HEIGHT as u8 {
+            for x in 0..LCD_WIDTH as u8 {
+                self.render_pixel(y, x);
+            }
+        }
+    }
+
 }
 
 #[cfg(test)]
