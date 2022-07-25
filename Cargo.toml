@@ -1,8 +1,10 @@
 [package]
+edition = "2021"
 name = "gbe"
 version = "0.1.0"
-edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+cpal = "0.13"
+fundsp = "0.6.5"
