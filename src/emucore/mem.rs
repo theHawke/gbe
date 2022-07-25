@@ -1,3 +1,6 @@
+use std::{cell::RefCell, rc::Rc};
+
+use super::audio::SoundController;
 
 pub trait MemoryIfc {
     fn read(&self, addr: u16) -> u8;
@@ -7,25 +10,26 @@ pub trait MemoryIfc {
     fn get_cr_mut(&mut self) -> &mut ControlRegisters;
 }
 
-
 pub struct GBMemory {
     wram: Box<[u8; 8192]>,
     vram: Box<[u8; 8192]>,
     oam: Box<[u8; 160]>,
     bootrom: Option<Box<[u8; 256]>>,
     cartridge: Cartridge,
-    control_registers: ControlRegisters
+    control_registers: ControlRegisters,
+    sound_controller: Rc<RefCell<SoundController>>,
 }
 
 impl GBMemory {
-    pub fn new(cartridge: Cartridge) -> GBMemory {
+    pub fn new(cartridge: Cartridge, sound: Rc<RefCell<SoundController>>) -> GBMemory {
         GBMemory {
             wram: Box::new([0; 8192]),
             vram: Box::new([0; 8192]),
             oam: Box::new([0; 160]),
             bootrom: None,
             cartridge,
-            control_registers: ControlRegisters::new()
+            control_registers: ControlRegisters::new(),
+            sound_controller: sound,
         }
     }
 }
@@ -34,28 +38,24 @@ impl MemoryIfc for GBMemory {
     fn read(&self, addr: u16) -> u8 {
         if let Some(ref rom) = self.bootrom {
             if !self.control_registers.bootrom_disable && addr < 0x0100 {
-                return rom[addr as usize]
+                return rom[addr as usize];
             }
         }
         if addr < 0x8000 {
             self.cartridge.read_rom(addr)
-        }
-        else if addr < 0xA000 {
+        } else if addr < 0xA000 {
             self.vram[(addr & 0x1FFF) as usize]
-        }
-        else if addr < 0xC000 {
+        } else if addr < 0xC000 {
             self.cartridge.read_ram(addr & 0x1FFF)
-        }
-        else if addr < 0xFE00 {
+        } else if addr < 0xFE00 {
             self.wram[(addr & 0x1FFF) as usize]
-        }
-        else if addr < 0xFEA0 {
+        } else if addr < 0xFEA0 {
             self.oam[(addr & 0x00FF) as usize]
-        }
-        else if addr < 0xFF00 {
+        } else if addr < 0xFF00 {
             0 // empty memory region
-        }
-        else {
+        } else if addr >= 0xFF10 && addr < 0xFF40 {
+            self.sound_controller.borrow().read(addr)
+        } else {
             self.control_registers.read_cr(addr)
         }
     }
@@ -63,23 +63,19 @@ impl MemoryIfc for GBMemory {
     fn write(&mut self, addr: u16, val: u8) {
         if addr < 0x8000 {
             self.cartridge.write_rom(addr, val)
-        }
-        else if addr < 0xA000 {
+        } else if addr < 0xA000 {
             self.vram[(addr & 0x1FFF) as usize] = val
-        }
-        else if addr < 0xC000 {
+        } else if addr < 0xC000 {
             self.cartridge.write_ram(addr & 0x1FFF, val)
-        }
-        else if addr < 0xFE00 {
+        } else if addr < 0xFE00 {
             self.wram[(addr & 0x1FFF) as usize] = val
-        }
-        else if addr < 0xFEA0 {
+        } else if addr < 0xFEA0 {
             self.oam[(addr & 0x00FF) as usize] = val
-        }
-        else if addr < 0xFF00 {
+        } else if addr < 0xFF00 {
             // empty memory region
-        }
-        else {
+        } else if addr >= 0xFF10 && addr < 0xFF40 {
+            self.sound_controller.borrow_mut().write(addr, val);
+        } else {
             self.control_registers.write_cr(addr & 0x00FF, val)
         }
     }
@@ -109,8 +105,7 @@ impl Cartridge {
     fn read_rom(&self, addr: u16) -> u8 {
         if (addr as usize) < self.rom.len() {
             self.rom[addr as usize]
-        }
-        else {
+        } else {
             0
         }
     }
@@ -122,8 +117,7 @@ impl Cartridge {
     fn read_ram(&self, addr: u16) -> u8 {
         if (addr as usize) < self.ram.len() {
             self.ram[addr as usize]
-        }
-        else {
+        } else {
             0
         }
     }
@@ -156,22 +150,23 @@ impl ControlRegisters {
     fn read_cr(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0xFEFF => panic!(),
-            0xFF0F          => self.interrupt_flag,
-            0xFF50          => self.bootrom_disable as u8,
+            0xFF0F => self.interrupt_flag,
+            0xFF10..=0xFF3F => 0xFF,
+            0xFF50 => self.bootrom_disable as u8,
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize],
-            0xFFFF          => self.interrupt_enable,
-            _               => 0xFF,
+            0xFFFF => self.interrupt_enable,
+            _ => 0xFF,
         }
     }
 
     fn write_cr(&mut self, addr: u16, val: u8) {
         match addr {
             0x0000..=0xFEFF => panic!(),
-            0xFF0F          => self.interrupt_flag = val & 0x1F,
-            0xFF50          => self.bootrom_disable |= val & 0x01 != 0,
+            0xFF0F => self.interrupt_flag = val & 0x1F,
+            0xFF50 => self.bootrom_disable |= val & 0x01 != 0,
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize] = val,
-            0xFFFF          => self.interrupt_enable = val & 0x1F,
-            _ => {},
+            0xFFFF => self.interrupt_enable = val & 0x1F,
+            _ => {}
         }
     }
 }
