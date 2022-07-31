@@ -2,8 +2,7 @@ use std::ops::{Add, Mul};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    BufferSize, OutputCallbackInfo, SampleFormat, SampleRate, Stream, StreamConfig,
-    SupportedStreamConfigRange,
+    OutputCallbackInfo, SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfigRange,
 };
 use ringbuf::{Consumer, Producer, RingBuffer};
 
@@ -63,6 +62,7 @@ impl SoundDriver {
         self.interpolate += advance;
         while self.interpolate >= 1. {
             self.advance_buffer();
+            self.interpolate -= 1.;
         }
         self.current * self.interpolate + self.prev * (1. - self.interpolate)
     }
@@ -92,15 +92,13 @@ impl SoundController {
     fn choose_stream_config(device: &impl DeviceTrait) -> StreamConfig {
         let configs = device
             .supported_output_configs()
-            .expect("Could not retrieve stream configs.");
-        let mut config = configs
+            .expect("Could not retrieve stream configs");
+        configs
             .filter(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
             .max_by(SupportedStreamConfigRange::cmp_default_heuristics)
-            .expect("Could not find supported sound config.")
+            .expect("Could not find supported sound config")
             .with_max_sample_rate()
-            .config();
-        config.buffer_size = BufferSize::Fixed(100);
-        config
+            .config()
     }
 
     pub fn new() -> Self {
@@ -109,7 +107,7 @@ impl SoundController {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
-            .expect("Failed to retrieve sound device.");
+            .expect("Failed to retrieve sound device");
         let config = Self::choose_stream_config(&device);
         let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
         let mut driver = SoundDriver::new(consumer, config.sample_rate);
@@ -120,8 +118,8 @@ impl SoundController {
         };
         let stream = device
             .build_output_stream(&config, output_fn, err_fn)
-            .expect("Failed to create stream.");
-        stream.play().expect("Failed to start sound playback.");
+            .expect("Failed to create stream");
+        stream.play().expect("Failed to start sound playback");
         SoundController {
             ticks: 0,
             c1: Channel1::new(),
@@ -147,7 +145,7 @@ impl SoundController {
         self.ticks += 1;
         if self.ticks & 0x01 == 0 {
             // 2 MHz
-            self.c3.tick();
+            self.c3.wave_channel.freq_clock();
         }
         if self.ticks & 0x03 == 0 {
             // 1 Mhz
@@ -156,12 +154,13 @@ impl SoundController {
         }
         if self.ticks & 0x07 == 0 {
             // 512 kHz
-            self.c4.tick();
+            self.c4.noise_lfsr.freq_clock();
         }
         if self.ticks & 0x3FFF == 0 {
             // 256 Hz
             self.c1.length_counter.length_clock();
             self.c2.length_counter.length_clock();
+            self.c3.length_counter.length_clock();
         }
         if self.ticks & 0x7FFF == 0 {
             // 128 Hz
@@ -240,20 +239,20 @@ impl SoundController {
             0xFF19 => (self.c2.length_counter.use_length as u8) << 6 | 0xBF, // restart and frequency are read only
             0xFF1A => (self.c3.active as u8) << 7 | 0x7F,
             0xFF1B => 0xFF, // length is write-only
-            0xFF1C => 0x9F | self.c3.level << 5 & 0x60,
+            0xFF1C => 0x9F | self.c3.wave_channel.level << 5 & 0x60,
             0xFF1D => 0xFF, // frequncy is write only
-            0xFF1E => (self.c3.use_length as u8) << 6 | 0xBF, // restart and frequency are read only
-            0xFF1F => 0xFF, // unused
-            0xFF20 => 0xFF, // length is write-only
+            0xFF1E => (self.c3.length_counter.use_length as u8) << 6 | 0xBF, // restart and frequency are read only
+            0xFF1F => 0xFF,                                                  // unused
+            0xFF20 => 0xFF,                                                  // length is write-only
             0xFF21 => {
-                self.c4.volume << 4 & 0xF0 | (self.c4.env_up as u8) << 3 | self.c4.env_slope & 0x07
+                self.c4.volume_envelope.volume << 4 & 0xF0 | (self.c4.volume_envelope.env_up as u8) << 3 | self.c4.volume_envelope.envelope & 0x07
             }
             0xFF22 => {
-                self.c4.freq_shift << 4 & 0xF0
-                    | (self.c4.lfsr_width as u8) << 3
-                    | self.c4.freq_div & 0x07
+                self.c4.noise_lfsr.freq_shift << 4 & 0xF0
+                    | (self.c4.noise_lfsr.narrow_lfsr as u8) << 3
+                    | self.c4.noise_lfsr.freq_div & 0x07
             }
-            0xFF23 => (self.c4.use_length as u8) << 6 | 0xBF, // restart is read only
+            0xFF23 => (self.c4.length_counter.use_length as u8) << 6 | 0xBF, // restart is read only
             0xFF24 => 0x88 | self.volume2 << 4 & 0x70 | self.volume1 & 0x07,
             0xFF25 => {
                 (self.mixer2[3] as u8) << 7
@@ -273,7 +272,7 @@ impl SoundController {
                     | self.c1.is_sound_on() as u8
             }
             0xFF27..=0xFF2F => 0xFF, // unused
-            0xFF30..=0xFF3F => self.c3.wave_pattern[(addr & 0x000F) as usize],
+            0xFF30..=0xFF3F => self.c3.wave_channel.wave_pattern[(addr & 0x000F) as usize],
             0xFF40..=0xFFFF => panic!(),
         }
     }
@@ -301,7 +300,7 @@ impl SoundController {
             0xFF14 => {
                 self.c1.length_counter.use_length = val & 0x40 != 0;
                 self.c1.square_wave.frequency =
-                    self.c1.square_wave.frequency & 0x00FF | ((val & 0x03) as u16) << 8;
+                    self.c1.square_wave.frequency & 0x00FF | ((val & 0x07) as u16) << 8;
                 if val & 0x80 != 0 {
                     self.c1.restart();
                 }
@@ -322,7 +321,7 @@ impl SoundController {
             0xFF19 => {
                 self.c2.length_counter.use_length = val & 0x40 != 0;
                 self.c2.square_wave.frequency =
-                    self.c2.square_wave.frequency & 0x00FF | ((val & 0x03) as u16) << 8;
+                    self.c2.square_wave.frequency & 0x00FF | ((val & 0x07) as u16) << 8;
                 if val & 0x80 != 0 {
                     self.c2.restart();
                 }
@@ -331,42 +330,37 @@ impl SoundController {
                 self.c3.active = val & 0x80 != 0;
             }
             0xFF1B => {
-                self.c3.length = val;
-                self.c3.length_changed();
+                self.c3.length_counter.write_length(val);
             }
             0xFF1C => {
-                self.c3.level = val >> 5 & 0x03;
+                self.c3.wave_channel.level = val >> 5 & 0x03;
             }
             0xFF1D => {
-                self.c3.frequency = self.c3.frequency & 0xFF00 | val as u16;
-                self.c3.frequency_changed();
+                self.c3.wave_channel.frequency = self.c3.wave_channel.frequency & 0xFF00 | val as u16;
             }
             0xFF1E => {
-                self.c3.use_length = val & 0x40 != 0;
-                self.c3.frequency = self.c3.frequency & 0x00FF | ((val & 0x03) as u16) << 8;
-                self.c3.frequency_changed();
+                self.c3.length_counter.use_length = val & 0x40 != 0;
+                self.c3.wave_channel.frequency = self.c3.wave_channel.frequency & 0x00FF | ((val & 0x07) as u16) << 8;
                 if val & 0x80 != 0 {
                     self.c3.restart();
                 }
             }
             0xFF1F => (), // unused
             0xFF20 => {
-                self.c4.length = val & 0x3F;
-                self.c4.length_changed();
+                self.c4.length_counter.write_length(val & 0x3F);
             }
             0xFF21 => {
-                self.c4.volume = val >> 4 & 0x0F;
-                self.c4.env_up = val & 0x08 != 0;
-                self.c4.env_slope = val & 0x07;
+                self.c4.volume_envelope.volume = val >> 4 & 0x0F;
+                self.c4.volume_envelope.env_up = val & 0x08 != 0;
+                self.c4.volume_envelope.envelope = val & 0x07;
             }
             0xFF22 => {
-                self.c4.freq_shift = val >> 4 & 0x0F;
-                self.c4.lfsr_width = val & 0x08 != 0;
-                self.c4.freq_div = val & 0x07;
-                self.c4.frequency_changed();
+                self.c4.noise_lfsr.freq_shift = val >> 4 & 0x0F;
+                self.c4.noise_lfsr.narrow_lfsr = val & 0x08 != 0;
+                self.c4.noise_lfsr.freq_div = val & 0x07;
             }
             0xFF23 => {
-                self.c4.use_length = val & 0x40 != 0;
+                self.c4.length_counter.use_length = val & 0x40 != 0;
                 if val & 0x80 != 0 {
                     self.c4.restart();
                 }
@@ -386,23 +380,23 @@ impl SoundController {
             }
             0xFF27..=0xFF2F => (), // unused
             0xFF30..=0xFF3F => {
-                self.c3.wave_pattern[(addr & 0x000F) as usize] = val;
+                self.c3.wave_channel.wave_pattern[(addr & 0x000F) as usize] = val;
             }
             0xFF40..=0xFFFF => panic!(),
         }
     }
 }
 
-struct LengthCounter {
+struct LengthCounter<const S: u16> {
     use_length: bool,
-    length_timer: u8,
+    length_timer: u16,
 }
 
-impl LengthCounter {
+impl<const S: u16> LengthCounter<S> {
     fn new() -> Self {
         LengthCounter {
             use_length: false,
-            length_timer: 64,
+            length_timer: S,
         }
     }
 
@@ -413,12 +407,12 @@ impl LengthCounter {
     }
 
     fn write_length(&mut self, length: u8) {
-        self.length_timer = 64 - (length & 0x3F);
+        self.length_timer = S - length as u16;
     }
 
     fn reset(&mut self) {
         if self.length_timer == 0 {
-            self.length_timer = 64;
+            self.length_timer = S;
         }
     }
 
@@ -439,7 +433,7 @@ impl SquareWave {
         SquareWave {
             duty: 0,
             frequency: 0,
-            freq_timer: 0,
+            freq_timer: 2048,
             duty_step: 0,
         }
     }
@@ -447,14 +441,10 @@ impl SquareWave {
     fn freq_clock(&mut self) {
         self.freq_timer -= 1;
         if self.freq_timer == 0 {
-            self.duty_clock();
             self.freq_timer = 2048 - self.frequency;
+            self.duty_step += 1;
+            self.duty_step &= 0x07;
         }
-    }
-
-    fn duty_clock(&mut self) {
-        self.duty_step += 1;
-        self.duty_step &= 0x07;
     }
 
     fn reset(&mut self) {
@@ -573,7 +563,7 @@ impl FrequencySweep {
                 self.shadow_freq
                     .wrapping_sub(self.shadow_freq >> self.sweep_shift)
             } else {
-                self.shadow_freq + self.shadow_freq >> self.sweep_shift
+                self.shadow_freq + (self.shadow_freq >> self.sweep_shift)
             }
         } else {
             self.shadow_freq
@@ -616,7 +606,7 @@ struct Channel1 {
     frequency_sweep: FrequencySweep,
     square_wave: SquareWave,
     volume_envelope: VolumeEnvelope,
-    length_counter: LengthCounter,
+    length_counter: LengthCounter<64>,
 }
 
 impl Channel1 {
@@ -660,7 +650,7 @@ impl Channel1 {
 struct Channel2 {
     square_wave: SquareWave,
     volume_envelope: VolumeEnvelope,
-    length_counter: LengthCounter,
+    length_counter: LengthCounter<64>,
 }
 
 impl Channel2 {
@@ -672,20 +662,13 @@ impl Channel2 {
         }
     }
 
-    fn dac(&self, val: u8) -> f32 {
-        if self.volume_envelope.dac_on() {
-            2. * val as f32 / 15. - 1.
-        } else {
-            0.
-        }
-    }
-
     fn get_output(&self) -> f32 {
-        self.dac(if self.is_sound_on() {
+        let val = if self.is_sound_on() {
             self.volume_envelope.output(self.square_wave.wave_output())
         } else {
             0
-        })
+        };
+        dac(self.volume_envelope.dac_on(), val)
     }
 
     fn restart(&mut self) {
@@ -699,83 +682,173 @@ impl Channel2 {
     }
 }
 
-struct Channel3 {
-    active: bool,
-    length: u8,
+struct WaveChannel {
     level: u8,
     frequency: u16,
-    use_length: bool,
     wave_pattern: [u8; 16],
+    freq_timer: u16,
+    wave_pos: u8,
+}
+
+impl WaveChannel {
+    fn new() -> Self {
+        WaveChannel {
+            level: 0,
+            frequency: 0,
+            wave_pattern: [0; 16],
+            freq_timer: 2048,
+            wave_pos: 0,
+        }
+    }
+
+    fn freq_clock(&mut self) {
+        self.freq_timer -= 1;
+        if self.freq_timer == 0 {
+            self.freq_timer = 2048 - self.frequency;
+            self.wave_pos += 1;
+            self.wave_pos &= 0x1F;
+        }
+    }
+
+    fn get_sample(&self) -> u8 {
+        let b = self.wave_pattern[(self.wave_pos >> 1) as usize];
+        // two samples per byte, first sample in high nybble
+        if self.wave_pos & 1 == 0 {
+            b >> 4
+        } else {
+            b & 0x0F
+        }
+    }
+
+    fn output(&self) -> u8 {
+        if self.level != 0 {
+            self.get_sample() >> (self.level - 1)
+        } else {
+            0
+        }
+    }
+
+    fn reset(&mut self) {
+        self.freq_timer = 2048 - self.frequency;
+        self.wave_pos = 0;
+    }
+
+    fn sound_on(&self) -> bool {
+        self.level != 0
+    }
+}
+
+struct Channel3 {
+    active: bool,
+    length_counter: LengthCounter<256>,
+    wave_channel: WaveChannel,
 }
 
 impl Channel3 {
     fn new() -> Self {
         Channel3 {
             active: false,
-            length: 0,
-            level: 0,
-            frequency: 0,
-            use_length: false,
-            wave_pattern: [0; 16],
+            length_counter: LengthCounter::new(),
+            wave_channel: WaveChannel::new(),
         }
     }
 
-    fn tick(&mut self) {}
-
     fn get_output(&self) -> f32 {
-        0.
+        dac(self.active, self.wave_channel.output())
     }
 
-    fn length_changed(&mut self) {}
-
-    fn frequency_changed(&mut self) {}
-
-    fn restart(&mut self) {}
+    fn restart(&mut self) {
+        self.length_counter.reset();
+        self.wave_channel.reset();
+    }
 
     fn is_sound_on(&self) -> bool {
-        false
+        self.active && self.length_counter.length_on() && self.wave_channel.sound_on()
+    }
+}
+
+struct NoiseLfsr {
+    freq_shift: u8,
+    narrow_lfsr: bool,
+    freq_div: u8,
+    lfsr: u16,
+    freq_timer: u16,
+}
+
+impl NoiseLfsr {
+    fn new() -> Self {
+        NoiseLfsr {
+            freq_shift: 0,
+            narrow_lfsr: false,
+            freq_div: 0,
+            lfsr: 0xFFFF,
+            freq_timer: 1,
+        }
+    }
+
+    fn period(&self) -> u16 {
+        if self.freq_div == 0 {
+            1 << self.freq_shift
+        } else {
+            (self.freq_div as u16) << (self.freq_shift + 1)
+        }
+    }
+
+    fn freq_clock(&mut self) {
+        self.freq_timer -= 1;
+        if self.freq_timer == 0 {
+            self.freq_timer = self.period();
+            let new = self.lfsr ^ (self.lfsr >> 1);
+            self.lfsr >>= 1;
+            self.lfsr |= new << 14;
+            if self.narrow_lfsr {
+                self.lfsr |= new << 6;
+            }
+        }
+    }
+
+    fn noise_output(&self) -> bool {
+        self.lfsr & 0x01 != 0
+    }
+
+    fn reset(&mut self) {
+        self.freq_timer = self.period();
+        self.lfsr = 0xFFFF;
     }
 }
 
 struct Channel4 {
-    length: u8,
-    volume: u8,
-    env_up: bool,
-    env_slope: u8,
-    freq_shift: u8,
-    lfsr_width: bool,
-    freq_div: u8,
-    use_length: bool,
+    length_counter: LengthCounter<64>,
+    volume_envelope: VolumeEnvelope,
+    noise_lfsr: NoiseLfsr,
 }
 
 impl Channel4 {
     fn new() -> Self {
         Channel4 {
-            length: 0,
-            volume: 0,
-            env_up: false,
-            env_slope: 0,
-            freq_shift: 0,
-            lfsr_width: false,
-            freq_div: 0,
-            use_length: false,
+            length_counter: LengthCounter::new(),
+            volume_envelope: VolumeEnvelope::new(),
+            noise_lfsr: NoiseLfsr::new(),
         }
     }
 
-    fn tick(&mut self) {}
-
     fn get_output(&self) -> f32 {
-        0.
+        let val = if self.is_sound_on() {
+            self.volume_envelope.output(self.noise_lfsr.noise_output())
+        } else {
+            0
+        };
+        dac(self.volume_envelope.dac_on(), val)
     }
 
-    fn length_changed(&mut self) {}
-
-    fn frequency_changed(&mut self) {}
-
-    fn restart(&mut self) {}
+    fn restart(&mut self) {
+        self.length_counter.reset();
+        self.volume_envelope.reset();
+        self.noise_lfsr.reset();
+    }
 
     fn is_sound_on(&self) -> bool {
-        false
+        self.length_counter.length_on() && self.volume_envelope.dac_on()
     }
 }
 
@@ -832,10 +905,8 @@ mod tests {
         println!("{:?}", config.buffer_size());
         println!("{:?}", config.sample_rate());
         println!("{:?}", config.sample_format());
-        let mut stream_config: StreamConfig = config.into();
-        stream_config.buffer_size = BufferSize::Fixed(100);
         let stream = device
-            .build_output_stream(&stream_config, output_fn, err_fn)
+            .build_output_stream(&config.into(), output_fn, err_fn)
             .expect("failed to build output stream");
         stream.play().unwrap();
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -845,18 +916,61 @@ mod tests {
     }
 
     #[test]
-    fn test_sound_controller() {
+    fn test_startup_sound() {
         let mut sc = SoundController::new();
-        let f = 1750;
         sc.write(0xFF26, 0x80); // enable
         sc.write(0xFF24, 0x77); // L/R volume
         sc.write(0xFF25, 0x11); // L/R mix
-        sc.write(0xFF11, 0x80); // duty / length
-        sc.write(0xFF12, 0xF0); // volume / envelope
-        sc.write(0xFF13, f as u8); // freq low
-        sc.write(0xFF14, 0x80 | (f >> 8) as u8);
+        sc.write(0xFF11, 0x80); // C1 duty / length
+        sc.write(0xFF12, 0xF3); // C1 volume / envelope
+        sc.write(0xFF13, 0x83); // C1 freq low
+        sc.write(0xFF14, 0x87); // C1 restart / freq high
 
-        for _ in 0 .. 1 << 22 {
+        for _ in 0..1 << 19 {
+            sc.tick();
+        }
+
+        sc.write(0xFF13, 0xC1);
+        sc.write(0xFF14, 0x87);
+
+        for _ in 0..1 << 22 {
+            sc.tick();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_wave_channel() {
+        let mut sc = SoundController::new();
+        let f = 1899;
+        sc.write(0xFF26, 0x80); // enable
+        sc.write(0xFF24, 0x22); // L/R volume
+        sc.write(0xFF25, 0x44); // L/R mix
+        sc.write(0xFF1A, 0x80); // C3 enable
+        sc.write(0xFF1C, 0x20); // C3 level
+        for i in 0..15 {
+            sc.write(0xFF30 + i, (i | i << 4) as u8); // C3 wave pattern (sawtooth wave)
+        }
+        sc.write(0xFF1D, f as u8); // C3 freq low
+        sc.write(0xFF1E, 0x80 | (f >> 8) as u8); // C3 restart / freq high
+
+        for _ in 0..1 << 22 {
+            sc.tick();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_noise_channel() {
+        let mut sc = SoundController::new();
+        sc.write(0xFF26, 0x80); // enable
+        sc.write(0xFF24, 0x22); // L/R volume
+        sc.write(0xFF25, 0x88); // L/R mix
+        sc.write(0xFF21, 0xF0); // C4 volume / envelope
+        sc.write(0xFF22, 0x47); // C4 lfsr
+        sc.write(0xFF23, 0x80); // C4 restart
+
+        for _ in 0..1 << 22 {
             sc.tick();
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
