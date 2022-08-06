@@ -5,17 +5,26 @@ use std::rc::Rc;
 use std::cell::{RefCell, Ref, RefMut};
 
 const MAX_SPRITES_PER_LINE: usize = 10;
-const LCD_WIDTH: usize = 160;
-const LDC_HEIGHT: usize = 144;
-const CYCLES_PER_FRAME: usize = 70224;
-const CYCLES_PER_LINE: usize = 456;
+pub const LCD_WIDTH: usize = 160;
+pub const LCD_HEIGHT: usize = 144;
+pub const LCD_PIXELS: usize = LCD_WIDTH*LCD_HEIGHT;
+const VBLANK_LINES: usize = 10;
+const LINES_PER_FRAME: usize = LCD_HEIGHT + VBLANK_LINES;
+const DOTS_PER_FRAME: usize = 70224;
+const DOTS_PER_LINE: usize = 456;
+const MODE_2_DOTS: usize = 80;
+const MODE_3_DOTS_MIN: usize = 172;
+const MODE_3_DOTS_PER_SPRITE: usize = 12;
 
 pub struct Ppu<M: MemoryIfc, C: Interruptible> {
     mem: Rc<RefCell<M>>,
     cpu: Rc<RefCell<C>>,
     line_sprites : [u8; MAX_SPRITES_PER_LINE],
     num_line_sprites: usize,
-    fb: Box<[u8; LCD_WIDTH*LDC_HEIGHT]>,
+    fb: Box<[u8; LCD_PIXELS]>,
+    current_line: u8,
+    current_dot_on_line: u16,
+    stat_interrupt_prev: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -125,13 +134,16 @@ impl OamEntry {
 
 impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
 
-    fn new(mem: Rc<RefCell<M>>, cpu: Rc<RefCell<C>>) -> Ppu<M, C> {
+    pub fn new(mem: Rc<RefCell<M>>, cpu: Rc<RefCell<C>>) -> Ppu<M, C> {
         Ppu { 
             mem,
             cpu, 
             line_sprites: [u8::MAX; MAX_SPRITES_PER_LINE],
             num_line_sprites: 0,
-            fb: Box::new([0; LCD_WIDTH*LDC_HEIGHT]),
+            fb: Box::new([0; LCD_PIXELS]),
+            current_line: 0,
+            current_dot_on_line: 0,
+            stat_interrupt_prev: false,
         }
     }
 
@@ -240,14 +252,77 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
         }
     }
 
+    #[cfg(test)]
     fn render_frame(&mut self) {
-        for y in 0..LDC_HEIGHT as u8 {
+        for y in 0..LCD_HEIGHT as u8 {
+            self.search_sprites(y);
             for x in 0..LCD_WIDTH as u8 {
                 self.render_pixel(y, x);
             }
         }
     }
 
+    fn check_stat_interrupt(&self) -> bool {
+        let stat = self.cr().stat;
+        let mode = stat & 0x03;
+        stat & 0x40 != 0 && stat & 0x04 != 0 || mode != 3 && stat & 0x08 << mode != 0
+    }
+
+    pub fn tick(&mut self) -> bool {
+        if self.current_dot_on_line == 0 {
+            self.cr_mut().ly = self.current_line;
+            let stat_flags = self.cr().stat & 0x78;
+            let lyc_match = self.current_line == self.cr().lyc;
+            self.cr_mut().stat = stat_flags | (lyc_match as u8) << 2;
+            match self.current_line {
+                0..=143 => {
+                    self.cr_mut().stat |= 0x02; // Mode 2: OAM access, mode-bits = 10
+                    self.search_sprites(self.current_line);
+                }
+                144 => {
+                    self.cr_mut().stat |= 0x01; // Mode 1: VBlank, mode-bits = 01
+                    self.cpu.borrow_mut().raise_interrupt(InterruptType::VBlank);
+                }
+                145..=153 => {}
+                _ => panic!()
+            }
+        }
+        if self.current_line < LCD_HEIGHT as u8 {
+            if self.current_dot_on_line == MODE_2_DOTS as u16 {
+                self.cr_mut().stat |= 0x03; // mode-bits = 11
+                self.render_pixel(self.current_line, 0);
+            }
+            else if self.current_dot_on_line > MODE_2_DOTS as u16 && self.current_dot_on_line < (MODE_2_DOTS+LCD_WIDTH) as u16 {
+                self.render_pixel(self.current_line, (self.current_dot_on_line - MODE_2_DOTS as u16) as u8);
+            }
+            else if self.current_dot_on_line == (MODE_3_DOTS_MIN + self.num_line_sprites * MODE_3_DOTS_PER_SPRITE) as u16 {
+                self.cr_mut().stat &= !0x03; // mode-bits = 00
+            }
+        }
+
+        // update stat interrupt
+        let stat_interrupt_new = self.check_stat_interrupt();
+        if !self.stat_interrupt_prev && stat_interrupt_new {
+            self.cpu.borrow_mut().raise_interrupt(InterruptType::LcdStat);
+        }
+        self.stat_interrupt_prev = stat_interrupt_new;
+
+        // advance dot
+        self.current_dot_on_line += 1;
+        if self.current_dot_on_line == DOTS_PER_LINE as u16 {
+            self.current_dot_on_line = 0;
+            self.current_line += 1;
+            if self.current_line == LINES_PER_FRAME as u8 {
+                self.current_line = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn get_frame(&self) -> &[u8; LCD_PIXELS] {
+        self.fb.as_ref()
+    }
 }
 
 #[cfg(test)]
@@ -255,7 +330,7 @@ mod test {
     use super::*;
     use crate::emucore::mem::ControlRegisters;
     use std::collections::HashMap;
-    use image::{ColorType, save_buffer};
+    use image::{ColorType, save_buffer, ImageError};
 
     struct Dummy {
         cr: ControlRegisters,
@@ -292,6 +367,17 @@ mod test {
         fn raise_interrupt(&mut self, _inter_type: InterruptType) {}
     }
 
-
+    #[test]
+    fn test_draw() -> Result<(), ImageError> {
+        let mem = Rc::new(RefCell::new(Dummy::from([(0x8010, 0xAA), (0x8011, 0xF0), (0x9800, 0x01)])));
+        let mut ppu = Ppu::new(mem.clone(), mem);
+        ppu.render_frame();
+        let mut image = [0u8; LCD_PIXELS];
+        for i in 0..image.len() {
+            let v = ppu.fb[i];
+            image[i] = v*v*27;
+        }
+        save_buffer("test_output/test_draw.png", &image, LCD_WIDTH as u32, LCD_HEIGHT as u32, ColorType::L8)
+    }
 
 }

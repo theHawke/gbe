@@ -9,6 +9,7 @@ version = "0.1.0"
 cpal = "0.13"
 fundsp = "0.6.5"
 ringbuf = "0.2.8"
+wav = "1.0.0"
 
 [dev-dependencies]
 image = "0.24.2"

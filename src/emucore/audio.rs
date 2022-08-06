@@ -1,18 +1,18 @@
 use std::ops::{Add, Mul};
-
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    OutputCallbackInfo, SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfigRange,
-};
 use ringbuf::{Consumer, Producer, RingBuffer};
 
 const SAMPLING_SHIFT: i32 = 6;
 const SAMPLING_MASK: u64 = (1 << SAMPLING_SHIFT) - 1;
-const RINGBUF_DT: f32 = 1. / (1 << 22 - SAMPLING_SHIFT) as f32;
-const RINGBUF_SIZE: usize = 4096;
+pub const RINGBUF_RATE: usize = 1 << 22 - SAMPLING_SHIFT;
+pub const RINGBUF_DT: f32 = 1. / RINGBUF_RATE as f32;
+pub const RINGBUF_SIZE: usize = 4096;
+
+pub trait AudioBackend {
+    fn setup_stream(&mut self, queue: Consumer<Frame>);
+}
 
 #[derive(Clone, Copy, PartialEq)]
-struct Frame(f32, f32);
+pub struct Frame(pub f32, pub f32);
 
 impl Mul<f32> for Frame {
     type Output = Self;
@@ -27,44 +27,6 @@ impl Add for Frame {
 
     fn add(self, rhs: Self) -> Self::Output {
         Frame(self.0 + rhs.0, self.1 + rhs.1)
-    }
-}
-
-struct SoundDriver {
-    buffer: Consumer<Frame>,
-    sample_rate: SampleRate,
-    current: Frame,
-    prev: Frame,
-    interpolate: f32,
-}
-
-impl SoundDriver {
-    fn new(buffer: Consumer<Frame>, sample_rate: SampleRate) -> Self {
-        SoundDriver {
-            buffer,
-            sample_rate,
-            current: Frame(0., 0.),
-            prev: Frame(0., 0.),
-            interpolate: 0.,
-        }
-    }
-
-    fn advance_buffer(&mut self) {
-        self.prev = self.current;
-        self.current = match self.buffer.pop() {
-            Some(f) => f,
-            None => self.current * 0.999,
-        }
-    }
-
-    fn next_frame(&mut self) -> Frame {
-        let advance = 1. / self.sample_rate.0 as f32 / RINGBUF_DT;
-        self.interpolate += advance;
-        while self.interpolate >= 1. {
-            self.advance_buffer();
-            self.interpolate -= 1.;
-        }
-        self.current * self.interpolate + self.prev * (1. - self.interpolate)
     }
 }
 
@@ -85,41 +47,15 @@ pub struct SoundController {
     prev_out2: f32,
     alpha: f32,
     soundbuf: Producer<Frame>,
-    stream: Stream,
+    _backend: Box<dyn AudioBackend>,
 }
 
 impl SoundController {
-    fn choose_stream_config(device: &impl DeviceTrait) -> StreamConfig {
-        let configs = device
-            .supported_output_configs()
-            .expect("Could not retrieve stream configs");
-        configs
-            .filter(|c| c.channels() == 2 && c.sample_format() == SampleFormat::F32)
-            .max_by(SupportedStreamConfigRange::cmp_default_heuristics)
-            .expect("Could not find supported sound config")
-            .with_max_sample_rate()
-            .config()
-    }
 
-    pub fn new() -> Self {
+    pub fn new(mut backend: Box<dyn AudioBackend>) -> Self {
         let buf = RingBuffer::new(RINGBUF_SIZE);
         let (producer, consumer) = buf.split();
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .expect("Failed to retrieve sound device");
-        let config = Self::choose_stream_config(&device);
-        let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
-        let mut driver = SoundDriver::new(consumer, config.sample_rate);
-        let output_fn = move |data: &mut [f32], _info: &OutputCallbackInfo| {
-            for i in 0..data.len() / 2 {
-                Frame(data[2 * i], data[2 * i + 1]) = driver.next_frame();
-            }
-        };
-        let stream = device
-            .build_output_stream(&config, output_fn, err_fn)
-            .expect("Failed to create stream");
-        stream.play().expect("Failed to start sound playback");
+        backend.setup_stream(consumer);
         SoundController {
             ticks: 0,
             c1: Channel1::new(),
@@ -135,9 +71,9 @@ impl SoundController {
             prev2: 0.,
             prev_out1: 0.,
             prev_out2: 0.,
-            alpha: 0.999,
+            alpha: 0.95,
             soundbuf: producer,
-            stream,
+            _backend: backend,
         }
     }
 
@@ -855,69 +791,12 @@ impl Channel4 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-
-    struct SoundGenerator {
-        frequency: Arc<Mutex<u16>>,
-        sample_num: u32,
-        sample_rate: u32,
-        previous_output: f32,
-        previous_sample: f32,
-        alpha: f32,
-    }
-
-    impl SoundGenerator {
-        fn next_sample(&mut self) -> f32 {
-            let t = self.sample_num as f32 / self.sample_rate as f32;
-            let period = (2048 - *self.frequency.lock().unwrap()) as f32 / 131072.;
-            let v = 0.2 * (((t % period < period / 2.) as i32) * 2 - 1) as f32;
-            self.sample_num += 1;
-            let out = self.alpha * (self.previous_sample + v - self.previous_output);
-            self.previous_output = v;
-            self.previous_sample = out;
-            out
-        }
-    }
-
-    #[test]
-    fn test_cpal() {
-        let host = cpal::default_host();
-        let device = host.default_output_device().unwrap();
-        let config = device.default_output_config().unwrap();
-        let err_fn = |err| eprintln!("an error occurred on the output audio stream: {}", err);
-        let freq = Arc::new(Mutex::new(0));
-        let mut sound_generator = SoundGenerator {
-            sample_num: 0,
-            sample_rate: config.sample_rate().0,
-            frequency: freq.clone(),
-            previous_output: 0.,
-            previous_sample: 0.,
-            alpha: 0.99,
-        };
-        *freq.lock().unwrap() = 1750;
-        let output_fn = move |data: &mut [f32], _info: &OutputCallbackInfo| {
-            for i in 0..data.len() / 2 {
-                let s = sound_generator.next_sample();
-                data[2 * i] = s;
-                data[2 * i + 1] = s;
-            }
-        };
-        println!("{:?}", config.buffer_size());
-        println!("{:?}", config.sample_rate());
-        println!("{:?}", config.sample_format());
-        let stream = device
-            .build_output_stream(&config.into(), output_fn, err_fn)
-            .expect("failed to build output stream");
-        stream.play().unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        *freq.lock().unwrap() = 1899;
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        stream.pause().unwrap();
-    }
+    use crate::app::audio_backend::CpalBackend;
 
     #[test]
     fn test_startup_sound() {
-        let mut sc = SoundController::new();
+        let backend = Box::new(CpalBackend::new());
+        let mut sc = SoundController::new(backend);
         sc.write(0xFF26, 0x80); // enable
         sc.write(0xFF24, 0x77); // L/R volume
         sc.write(0xFF25, 0x11); // L/R mix
@@ -941,7 +820,8 @@ mod tests {
 
     #[test]
     fn test_wave_channel() {
-        let mut sc = SoundController::new();
+        let backend = Box::new(CpalBackend::new());
+        let mut sc = SoundController::new(backend);
         let f = 1899;
         sc.write(0xFF26, 0x80); // enable
         sc.write(0xFF24, 0x22); // L/R volume
@@ -962,7 +842,8 @@ mod tests {
 
     #[test]
     fn test_noise_channel() {
-        let mut sc = SoundController::new();
+        let backend = Box::new(CpalBackend::new());
+        let mut sc = SoundController::new(backend);
         sc.write(0xFF26, 0x80); // enable
         sc.write(0xFF24, 0x22); // L/R volume
         sc.write(0xFF25, 0x88); // L/R mix

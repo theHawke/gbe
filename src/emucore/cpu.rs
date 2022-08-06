@@ -17,6 +17,7 @@ pub trait Interruptible {
 }
 
 pub struct Cpu<M: MemoryIfc> {
+    ticks: u64,
     state: CpuState,
     mem: Rc<RefCell<M>>,
     opcode: Opcode,
@@ -249,6 +250,7 @@ impl<M: MemoryIfc> Interruptible for Cpu<M> {
 impl<M: MemoryIfc> Cpu<M> {
     pub fn new(mem: Rc<RefCell<M>>) -> Cpu<M> {
         Cpu {
+            ticks: 0,
             state: CpuState::new(),
             opcode: 0,
             dispatch: Cpu::nop,
@@ -260,17 +262,23 @@ impl<M: MemoryIfc> Cpu<M> {
     }
 
     pub fn tick(&mut self) {
-        match self.state.state {
-            State::Running => {
-                (self.dispatch)(self, self.opcode, self.mcycle);
-                self.mcycle += 1;
+        if self.ticks & 0x03 == 0 {
+            match self.state.state {
+                State::Running => {
+                    (self.dispatch)(self, self.opcode, self.mcycle);
+                    self.mcycle += 1;
+                }
+                State::Halt => {}
+                State::Stop => {}
+                State::Error => {}
             }
-            State::Halt => {}
-            State::Stop => {}
-            State::Error => {}
+            //self.state.display();
         }
+        self.ticks += 1;
+    }
 
-        self.state.display();
+    pub fn running(&self) -> bool {
+        self.state.state == State::Running
     }
 
     //
@@ -2525,6 +2533,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exhausitve test - takes some time"]
     fn add_sub_exhaustive_test() {
         // exhaustive test of all ADD/ADC/SUB/SBC calculations, because I can't be bothered to think of all the edge case
         for a in 0..=255u8 {
