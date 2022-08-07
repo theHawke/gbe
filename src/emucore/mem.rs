@@ -83,7 +83,7 @@ impl MemoryIfc for GBMemory {
         } else if addr >= 0xFF10 && addr < 0xFF40 {
             self.sound_controller.borrow_mut().write(addr, val);
         } else {
-            self.control_registers.write_cr(addr & 0x00FF, val)
+            self.control_registers.write_cr(addr, val)
         }
     }
 
@@ -160,11 +160,24 @@ impl ControlRegisters {
         match addr {
             0x0000..=0xFEFF => panic!(),
             0xFF0F => self.interrupt_flag,
-            0xFF10..=0xFF3F => 0xFF,
+            0xFF40 => self.ppu_cr.lcdc,
+            0xFF41 => self.ppu_cr.stat,
+            0xFF42 => self.ppu_cr.scy,
+            0xFF43 => self.ppu_cr.scx,
+            0xFF44 => self.ppu_cr.ly,
+            0xFF45 => self.ppu_cr.lyc,
+            0xFF47 => self.ppu_cr.bgp,
+            0xFF48 => self.ppu_cr.obp0,
+            0xFF49 => self.ppu_cr.obp1,
+            0xFF4A => self.ppu_cr.wy,
+            0xFF4B => self.ppu_cr.wx,
             0xFF50 => self.bootrom_disable as u8,
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize],
             0xFFFF => self.interrupt_enable,
-            _ => 0xFF,
+            _ => {
+                eprintln!("Invalid/Unimlemented control register read.");   
+                0xFF
+            }
         }
     }
 
@@ -172,10 +185,22 @@ impl ControlRegisters {
         match addr {
             0x0000..=0xFEFF => panic!(),
             0xFF0F => self.interrupt_flag = val & 0x1F,
+            0xFF40 => self.ppu_cr.lcdc = val,
+            0xFF41 => self.ppu_cr.stat = val & 0xFC,
+            0xFF42 => self.ppu_cr.scy = val,
+            0xFF43 => self.ppu_cr.scx = val,
+            0xFF45 => self.ppu_cr.lyc = val,
+            0xFF47 => self.ppu_cr.bgp = val,
+            0xFF48 => self.ppu_cr.obp0 = val,
+            0xFF49 => self.ppu_cr.obp1 = val,
+            0xFF4A => self.ppu_cr.wy = val,
+            0xFF4B => self.ppu_cr.wx = val,
             0xFF50 => self.bootrom_disable |= val & 0x01 != 0,
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize] = val,
             0xFFFF => self.interrupt_enable = val & 0x1F,
-            _ => {}
+            _ => {
+                eprintln!("Invalid/Unimlemented control register write.");
+            }
         }
     }
 }

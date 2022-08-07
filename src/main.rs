@@ -1,8 +1,6 @@
-mod emucore;
-mod app;
-
 use std::cell::RefCell;
 use std::rc::Rc;
+use gbe::*;
 
 fn main() {
     println!("Hello, world!");

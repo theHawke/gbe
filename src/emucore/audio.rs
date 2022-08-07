@@ -71,7 +71,7 @@ impl SoundController {
             prev2: 0.,
             prev_out1: 0.,
             prev_out2: 0.,
-            alpha: 0.95,
+            alpha: 0.98,
             soundbuf: producer,
             _backend: backend,
         }
@@ -134,8 +134,8 @@ impl SoundController {
             if self.mixer2[3] {
                 preamp2 += self.c4.get_output();
             }
-            let val1 = preamp1 * (self.volume1 as f32 + 1.) / 8.;
-            let val2 = preamp2 * (self.volume2 as f32 + 1.) / 8.;
+            let val1 = preamp1 * (self.volume1 as f32 + 1.) / 16.;
+            let val2 = preamp2 * (self.volume2 as f32 + 1.) / 16.;
             let out1 = self.alpha * (self.prev_out1 + val1 - self.prev1);
             let out2 = self.alpha * (self.prev_out2 + val2 - self.prev2);
             while let Err(_) = self.soundbuf.push(Frame(out1, out2)) {

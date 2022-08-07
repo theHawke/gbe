@@ -25,6 +25,7 @@ pub struct Cpu<M: MemoryIfc> {
     mcycle: MCycle,
     temp8: u8,
     temp16: u16,
+    new_instr: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -42,7 +43,7 @@ impl CpuState {
             ime: true,
         }
     }
-    fn display(&self) {
+    fn _display(&self) {
         println!("State: {:?}", self.state);
         println!("Registers:");
         let b = self.reg.b();
@@ -258,10 +259,12 @@ impl<M: MemoryIfc> Cpu<M> {
             temp8: 0,
             temp16: 0,
             mem,
+            new_instr: false,
         }
     }
 
     pub fn tick(&mut self) {
+        self.new_instr = false;
         if self.ticks & 0x03 == 0 {
             match self.state.state {
                 State::Running => {
@@ -279,6 +282,14 @@ impl<M: MemoryIfc> Cpu<M> {
 
     pub fn running(&self) -> bool {
         self.state.state == State::Running
+    }
+
+    pub fn new_instr(&self) -> bool {
+        self.new_instr
+    }
+
+    pub fn get_pc(&self) -> u16 {
+        self.state.reg.pc
     }
 
     //
@@ -385,6 +396,7 @@ impl<M: MemoryIfc> Cpu<M> {
         else {
             self.opcode = self.read_inc_pc();
             self.dispatch = Cpu::OPCODE_DISPATCH[self.opcode as usize];
+            self.new_instr = true;
         }
         self.mcycle = 0;
     }
@@ -894,7 +906,7 @@ impl<M: MemoryIfc> Cpu<M> {
                         self.mem_write(addr, self.state.reg.a());
                     }
                     _ => {
-                        self.state.reg.set_a(self.mem_read(self.temp16));
+                        self.state.reg.set_a(self.mem_read(addr));
                     }
                 }
             }
@@ -1471,7 +1483,7 @@ impl<M: MemoryIfc> Cpu<M> {
 
         // test bit
         let mask = 0x01 << bit;
-        let test = self.temp8 & mask != 0;
+        let test = self.temp8 & mask == 0;
         self.state.reg.update_flags(0x20, 0x40, (test as u8) << 7, 0x80);
 
         self.fetch();
@@ -2879,7 +2891,7 @@ mod tests {
                     else {
                         state.reg.hl = 0xDEAD;
                     }
-                    state.reg.update_flags(0x20, 0x00, if value & 0x01 << bit != 0 { 0x80 } else { 0x00 }, 0x80);
+                    state.reg.update_flags(0x20, 0x00, if value & 0x01 << bit == 0 { 0x80 } else { 0x00 }, 0x80);
                     // LD reg value
                     // BIT bit reg
                     let instructions: Vec<u8> = if target != 0x06 {
