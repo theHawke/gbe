@@ -4,6 +4,7 @@ use super::mem::MemoryIfc;
 use std::cell::{Ref, RefCell, RefMut};
 use std::ops::Deref;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 const MAX_SPRITES_PER_LINE: usize = 10;
 pub const LCD_WIDTH: usize = 160;
@@ -17,12 +18,14 @@ const MODE_2_DOTS: usize = 80;
 const MODE_3_DOTS_MIN: usize = 172;
 const MODE_3_DOTS_PER_SPRITE: usize = 12;
 
+pub type FrameBuffer = [u8; LCD_PIXELS];
+
 pub struct Ppu<M: MemoryIfc, C: Interruptible> {
     mem: Rc<RefCell<M>>,
     cpu: Rc<RefCell<C>>,
     line_sprites: [u8; MAX_SPRITES_PER_LINE],
     num_line_sprites: usize,
-    fb: Box<[u8; LCD_PIXELS]>,
+    fb: Arc<Mutex<FrameBuffer>>,
     current_line: u8,
     current_dot_on_line: u16,
     stat_interrupt_prev: bool,
@@ -141,7 +144,24 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
             cpu,
             line_sprites: [u8::MAX; MAX_SPRITES_PER_LINE],
             num_line_sprites: 0,
-            fb: Box::new([0; LCD_PIXELS]),
+            fb: Arc::new(Mutex::new([0; LCD_PIXELS])),
+            current_line: 0,
+            current_dot_on_line: 0,
+            stat_interrupt_prev: false,
+            line_buf_bg_win: [0; LCD_WIDTH],
+            line_buf_obj: [0; LCD_WIDTH],
+            line_buf_obj_x: [false; LCD_WIDTH],
+            line_buf_obj_prio: [false; LCD_WIDTH],
+        }
+    }
+
+    pub fn with_external_fb(mem: Rc<RefCell<M>>, cpu: Rc<RefCell<C>>, fb: Arc<Mutex<FrameBuffer>>) -> Ppu<M, C> {
+        Ppu {
+            mem,
+            cpu,
+            line_sprites: [u8::MAX; MAX_SPRITES_PER_LINE],
+            num_line_sprites: 0,
+            fb,
             current_line: 0,
             current_dot_on_line: 0,
             stat_interrupt_prev: false,
@@ -225,8 +245,9 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
         let mem = mem_r.deref();
         // display off => blank line/screen
         if !cr.display_on() {
+            let mut fb = self.fb.lock().unwrap();
             for i in (LCD_WIDTH * y as usize)..(LCD_WIDTH * (y + 1) as usize) {
-                self.fb[i] = 0;
+                fb[i] = 0;
             }
             return;
         }
@@ -329,8 +350,9 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
 
         // merge bg/win and obj layer
         let fb_line_start = LCD_WIDTH * y as usize;
+        let mut fb = self.fb.lock().unwrap();
         for x in 0..LCD_WIDTH {
-            self.fb[fb_line_start + x] = if cr.sprites_on()
+            fb[fb_line_start + x] = if cr.sprites_on()
                 && self.line_buf_obj_x[x]
                 && (!self.line_buf_obj_prio[0] || self.line_buf_bg_win[x] == 0)
             {
@@ -412,8 +434,12 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
         false
     }
 
-    pub fn get_frame(&self) -> &[u8; LCD_PIXELS] {
-        self.fb.as_ref()
+    pub fn get_frame<'a>(&'a self) -> impl Deref<Target = FrameBuffer> + 'a {
+        self.fb.lock().unwrap()
+    }
+
+    pub fn get_fb(&self) -> Arc<Mutex<FrameBuffer>> {
+        self.fb.clone()
     }
 }
 
@@ -471,8 +497,9 @@ mod test {
         let mut ppu = Ppu::new(mem.clone(), mem);
         ppu.render_frame();
         let mut image = [0u8; LCD_PIXELS];
+        let fb = ppu.fb.lock().unwrap();
         for i in 0..image.len() {
-            let v = ppu.fb[i];
+            let v = fb[i];
             image[i] = v * v * 27;
         }
         save_buffer(

@@ -54,7 +54,7 @@ fn test_bootrom() -> Result<(), image::ImageError> {
         if frame {
             let file_name = format!("test_output/bootrom_test/frame{}.png", frame_count);
             let output_file = Path::new(file_name.as_str());
-            let data = render(ppu.get_frame(), TEST_PALLETTE);
+            let data = render(&*ppu.get_frame(), TEST_PALLETTE);
             save_buffer(output_file, data.as_ref(), LCD_WIDTH as u32, LCD_HEIGHT as u32, image::ColorType::Rgb8)?;
             frame_count += 1;
         }
