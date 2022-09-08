@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{atomic::AtomicU8, mpsc, Arc, Mutex};
 
 use gbe::app::audio_backend::CpalBackend;
 use gbe::emucore::package::{EmulatorControl, Package};
@@ -27,11 +27,13 @@ fn start_emulator(fb: Arc<Mutex<FrameBuffer>>, time_passed: mpsc::Receiver<i64>)
     std::thread::spawn(move || {
         let control = Arc::new(Mutex::new(EmulatorControl::Run));
         let audio_backend = Box::new(CpalBackend::new());
+        let buttons = Arc::new(AtomicU8::new(0xFF));
         let mut package = Package::new(
-            Path::new("resources/roms/null.gb"),
+            Path::new("resources/roms/motocross.gb"),
             Some(Path::new("resources/bootrom/gb_bios.bin")),
             fb,
             audio_backend,
+            buttons,
         )
         .unwrap();
         package.run(time_passed, control);

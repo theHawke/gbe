@@ -3,12 +3,14 @@ use super::cpu::Cpu;
 use super::mem::{Cartridge, GBMemory};
 use super::ppu::{FrameBuffer, Ppu};
 use super::timer::Timer;
+use super::joypad::JoyPad;
 use crate::util::{Error, GBEResult};
 
 use std::cell::RefCell;
 use std::fs::read;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::AtomicU8;
 use std::sync::{mpsc, Arc, Mutex};
 
 pub struct Package {
@@ -16,6 +18,7 @@ pub struct Package {
     cpu: Rc<RefCell<Cpu<GBMemory>>>,
     ppu: Ppu<GBMemory, Cpu<GBMemory>>,
     timer: Timer<GBMemory, Cpu<GBMemory>>,
+    joypad: JoyPad<GBMemory, Cpu<GBMemory>>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -41,12 +44,13 @@ impl Package {
         bootrom: Option<&Path>,
         fb: Arc<Mutex<FrameBuffer>>,
         audio_backend: Box<dyn AudioBackend>,
+        buttons: Arc<AtomicU8>,
     ) -> GBEResult<Self> {
         let sound_controller = Rc::new(RefCell::new(SoundController::new(audio_backend)));
 
         let cartridge_bytes = read(rom)?;
         let cartridge = Cartridge::new(&cartridge_bytes);
-        let memory = if let Some(bootrom_path) = bootrom {
+        let mem = if let Some(bootrom_path) = bootrom {
             let bootrom_bytes = load_bootrom_bytes(bootrom_path)?;
             Rc::new(RefCell::new(GBMemory::with_bootrom(
                 bootrom_bytes,
@@ -59,14 +63,16 @@ impl Package {
                 sound_controller.clone(),
             )))
         };
-        let cpu = Rc::new(RefCell::new(Cpu::new(memory.clone())));
-        let ppu = Ppu::with_external_fb(memory.clone(), cpu.clone(), fb);
-        let timer = Timer::new(memory.clone(), cpu.clone());
+        let cpu = Rc::new(RefCell::new(Cpu::new(mem.clone())));
+        let ppu = Ppu::with_external_fb(mem.clone(), cpu.clone(), fb);
+        let timer = Timer::new(mem.clone(), cpu.clone());
+        let joypad = JoyPad::new(mem.clone(), cpu.clone(), buttons);
         Ok(Package {
             sound_controller,
             cpu,
             ppu,
             timer,
+            joypad,
         })
     }
 
@@ -76,9 +82,10 @@ impl Package {
         'main: loop {
             let frame;
             if *control.lock().unwrap() == EmulatorControl::Run {
+                self.sound_controller.borrow_mut().tick();
                 frame = self.ppu.tick();
                 self.timer.tick();
-                self.sound_controller.borrow_mut().tick();
+                self.joypad.tick();
                 self.cpu.borrow_mut().tick();
             } else {
                 frame = false;

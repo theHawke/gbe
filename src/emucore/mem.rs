@@ -1,7 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
-use super::ppu::PpuCR;
 use super::audio::SoundController;
+use super::ppu::PpuCR;
 
 pub trait MemoryIfc {
     fn read(&self, addr: u16) -> u8;
@@ -34,7 +34,11 @@ impl GBMemory {
         }
     }
 
-    pub fn with_bootrom(bootrom: Box<[u8; 256]>, cartridge: Cartridge, sound: Rc<RefCell<SoundController>>) -> Self {
+    pub fn with_bootrom(
+        bootrom: Box<[u8; 256]>,
+        cartridge: Cartridge,
+        sound: Rc<RefCell<SoundController>>,
+    ) -> Self {
         let mut mem = GBMemory::new(cartridge, sound);
         mem.bootrom = Some(bootrom);
         mem
@@ -140,6 +144,8 @@ impl Cartridge {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ControlRegisters {
     extra_ram: Box<[u8; 127]>,
+    pub joypad_read: u8,
+    pub joypad_write: Option<u8>,
     pub timer_div: u8,
     pub timer_ctr: u8,
     pub timer_mod: u8,
@@ -154,6 +160,8 @@ impl ControlRegisters {
     pub fn new() -> ControlRegisters {
         ControlRegisters {
             extra_ram: Box::new([0; 127]),
+            joypad_read: 0xFF,
+            joypad_write: None,
             timer_div: 0,
             timer_ctr: 0,
             timer_mod: 0,
@@ -168,7 +176,8 @@ impl ControlRegisters {
     fn read_cr(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0xFEFF => panic!(),
-            0xFF02 => 0x01, //indicates completed serial transfer
+            0xFF00 => self.joypad_read,
+            0xFF02 => 0x01, //DUMMY: indicates permanently completed serial transfer
             0xFF04 => self.timer_div,
             0xFF05 => self.timer_ctr,
             0xFF06 => self.timer_mod,
@@ -189,7 +198,7 @@ impl ControlRegisters {
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize],
             0xFFFF => self.interrupt_enable,
             _ => {
-                eprintln!("Invalid/Unimlemented control register read at {:x}.", addr);   
+                eprintln!("Invalid/Unimlemented control register read at {:x}.", addr);
                 0xFF
             }
         }
@@ -198,6 +207,7 @@ impl ControlRegisters {
     fn write_cr(&mut self, addr: u16, val: u8) {
         match addr {
             0x0000..=0xFEFF => panic!(),
+            0xFF00 => self.joypad_write = Some(val),
             0xFF04 => self.timer_div = 0,
             0xFF05 => self.timer_ctr = val,
             0xFF06 => self.timer_mod = val,
@@ -218,7 +228,10 @@ impl ControlRegisters {
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize] = val,
             0xFFFF => self.interrupt_enable = val & 0x1F,
             _ => {
-                eprintln!("Invalid/Unimlemented control register write: {:x} at {:x}.", val, addr);
+                eprintln!(
+                    "Invalid/Unimlemented control register write: {:x} at {:x}.",
+                    val, addr
+                );
             }
         }
     }
