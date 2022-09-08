@@ -119,6 +119,7 @@ impl Cartridge {
 
     fn write_rom(&mut self, _addr: u16, _val: u8) {
         // memory bank controllers use rom writes for bank select
+        eprintln!("rom/ram bank select ({:x} -> {:x})", _val, _addr);
     }
 
     fn read_ram(&self, addr: u16) -> u8 {
@@ -139,6 +140,10 @@ impl Cartridge {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ControlRegisters {
     extra_ram: Box<[u8; 127]>,
+    pub timer_div: u8,
+    pub timer_ctr: u8,
+    pub timer_mod: u8,
+    pub timer_ctrl: u8,
     pub interrupt_flag: u8,
     pub interrupt_enable: u8,
     bootrom_disable: bool,
@@ -149,6 +154,10 @@ impl ControlRegisters {
     pub fn new() -> ControlRegisters {
         ControlRegisters {
             extra_ram: Box::new([0; 127]),
+            timer_div: 0,
+            timer_ctr: 0,
+            timer_mod: 0,
+            timer_ctrl: 0,
             interrupt_flag: 0xE0,
             interrupt_enable: 0,
             bootrom_disable: false,
@@ -159,6 +168,11 @@ impl ControlRegisters {
     fn read_cr(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0xFEFF => panic!(),
+            0xFF02 => 0x01, //indicates completed serial transfer
+            0xFF04 => self.timer_div,
+            0xFF05 => self.timer_ctr,
+            0xFF06 => self.timer_mod,
+            0xFF07 => self.timer_ctr & 0x07,
             0xFF0F => self.interrupt_flag,
             0xFF40 => self.ppu_cr.lcdc,
             0xFF41 => self.ppu_cr.stat,
@@ -175,7 +189,7 @@ impl ControlRegisters {
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize],
             0xFFFF => self.interrupt_enable,
             _ => {
-                eprintln!("Invalid/Unimlemented control register read.");   
+                eprintln!("Invalid/Unimlemented control register read at {:x}.", addr);   
                 0xFF
             }
         }
@@ -184,12 +198,17 @@ impl ControlRegisters {
     fn write_cr(&mut self, addr: u16, val: u8) {
         match addr {
             0x0000..=0xFEFF => panic!(),
+            0xFF04 => self.timer_div = 0,
+            0xFF05 => self.timer_ctr = val,
+            0xFF06 => self.timer_mod = val,
+            0xFF07 => self.timer_ctrl = val & 0x07,
             0xFF0F => self.interrupt_flag = val & 0x1F,
             0xFF40 => self.ppu_cr.lcdc = val,
             0xFF41 => self.ppu_cr.stat = val & 0xFC,
             0xFF42 => self.ppu_cr.scy = val,
             0xFF43 => self.ppu_cr.scx = val,
             0xFF45 => self.ppu_cr.lyc = val,
+            0xFF46 => unimplemented!("OAM DMA"),
             0xFF47 => self.ppu_cr.bgp = val,
             0xFF48 => self.ppu_cr.obp0 = val,
             0xFF49 => self.ppu_cr.obp1 = val,
@@ -199,7 +218,7 @@ impl ControlRegisters {
             0xFF80..=0xFFFE => self.extra_ram[(addr & 0x007F) as usize] = val,
             0xFFFF => self.interrupt_enable = val & 0x1F,
             _ => {
-                eprintln!("Invalid/Unimlemented control register write.");
+                eprintln!("Invalid/Unimlemented control register write: {:x} at {:x}.", val, addr);
             }
         }
     }

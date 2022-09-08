@@ -2,6 +2,7 @@ use super::audio::{AudioBackend, SoundController};
 use super::cpu::Cpu;
 use super::mem::{Cartridge, GBMemory};
 use super::ppu::{FrameBuffer, Ppu};
+use super::timer::Timer;
 use crate::util::{Error, GBEResult};
 
 use std::cell::RefCell;
@@ -14,6 +15,7 @@ pub struct Package {
     sound_controller: Rc<RefCell<SoundController>>,
     cpu: Rc<RefCell<Cpu<GBMemory>>>,
     ppu: Ppu<GBMemory, Cpu<GBMemory>>,
+    timer: Timer<GBMemory, Cpu<GBMemory>>,
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -59,10 +61,12 @@ impl Package {
         };
         let cpu = Rc::new(RefCell::new(Cpu::new(memory.clone())));
         let ppu = Ppu::with_external_fb(memory.clone(), cpu.clone(), fb);
+        let timer = Timer::new(memory.clone(), cpu.clone());
         Ok(Package {
             sound_controller,
             cpu,
             ppu,
+            timer,
         })
     }
 
@@ -73,6 +77,7 @@ impl Package {
             let frame;
             if *control.lock().unwrap() == EmulatorControl::Run {
                 frame = self.ppu.tick();
+                self.timer.tick();
                 self.sound_controller.borrow_mut().tick();
                 self.cpu.borrow_mut().tick();
             } else {

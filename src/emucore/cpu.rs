@@ -241,8 +241,12 @@ impl<M: MemoryIfc> Interruptible for Cpu<M> {
         mem.get_cr_mut().interrupt_flag |= bit;
         if mem.get_cr().interrupt_enable & bit != 0 {
             // resume from HALT and STOP modes
-            if self.state.state == State::Halt || self.state.state == State::Stop && inter_type == InterruptType::JoyPad {
+            if self.state.state == State::Halt {
                 self.state.state = State::Running;
+            }
+            else if self.state.state == State::Stop && inter_type == InterruptType::JoyPad {
+                self.state.state = State::Running;
+                mem.write(0xFF04, 0); // reset timer divider register upon resuming from Stop
             }
         }
     }
@@ -441,6 +445,7 @@ impl<M: MemoryIfc> Cpu<M> {
 
         self.state.reg.pc = self.state.reg.pc.wrapping_add(1);
         self.state.state = State::Stop;
+        self.mem_write(0xFF04, 0); // stop instruction resets the timer divider register
 
         self.fetch();
     }
