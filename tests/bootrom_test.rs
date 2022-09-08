@@ -31,7 +31,7 @@ fn test_bootrom() -> Result<(), image::ImageError> {
 
     let audio_backend = Box::new(WavFileBackend::new(Path::new("test_output/bootrom_test/sound.wav")));
     let sound_controller = Rc::new(RefCell::new(SoundController::new(audio_backend)));
-    let bootrom = include_bytes!("../resources/bootrom/gb_bios.bin");
+    let bootrom = Box::new(*include_bytes!("../resources/bootrom/gb_bios.bin"));
     let mut cartridge_bytes = [0u8; 334];
     cartridge_bytes[256] = 0x76;
     for i in 0..0x30 {

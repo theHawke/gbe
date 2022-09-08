@@ -1,12 +1,10 @@
-use std::cell::RefCell;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::path::Path;
+use std::sync::{mpsc, Arc, Mutex};
 
 use gbe::app::audio_backend::CpalBackend;
-use gbe::emucore::audio::SoundController;
-use gbe::emucore::cpu::Cpu;
-use gbe::emucore::mem::{Cartridge, GBMemory};
-use gbe::emucore::ppu::{LCD_HEIGHT, LCD_PIXELS, LCD_WIDTH, Ppu, FrameBuffer};
+use gbe::emucore::package::{EmulatorControl, Package};
+use gbe::emucore::ppu::{FrameBuffer, LCD_HEIGHT, LCD_PIXELS, LCD_WIDTH};
+
 use gtk::cairo::{Filter, FontFace, FontSlant, FontWeight, Format, ImageSurface};
 use gtk::{prelude::*, Application, ApplicationWindow, DrawingArea};
 
@@ -27,43 +25,16 @@ fn main() {
 
 fn start_emulator(fb: Arc<Mutex<FrameBuffer>>, time_passed: mpsc::Receiver<i64>) {
     std::thread::spawn(move || {
+        let control = Arc::new(Mutex::new(EmulatorControl::Run));
         let audio_backend = Box::new(CpalBackend::new());
-        let sound_controller = Rc::new(RefCell::new(SoundController::new(audio_backend)));
-        let bootrom = include_bytes!("../../resources/bootrom/gb_bios.bin");
-        let mut cartridge_bytes = [0u8; 334];
-        cartridge_bytes[256] = 0x18;
-        cartridge_bytes[257] = 0xFE;
-        for i in 0..0x30 {
-            cartridge_bytes[0x104 + i] = bootrom[0xA8 + i];
-        }
-        cartridge_bytes[333] = !(0x19 - 1);
-        let cartridge = Cartridge::new(&cartridge_bytes);
-        let memory = Rc::new(RefCell::new(GBMemory::with_bootrom(bootrom, cartridge, sound_controller.clone())));
-        let cpu = Rc::new(RefCell::new(Cpu::new(memory.clone())));
-        let mut ppu = Ppu::with_external_fb(memory.clone(), cpu.clone(), fb);
-        
-        let mut time = time_passed.recv().unwrap();
-        let mut next_time = time;
-        'main: while cpu.borrow().running() {
-            let frame = ppu.tick();
-            sound_controller.borrow_mut().tick();
-            cpu.borrow_mut().tick();
-            if frame {
-                // notify main thread to redraw
-
-                // wait for notification to run next frame
-                while next_time < time {
-                    next_time = match time_passed.recv() {
-                        Ok(t) => t,
-                        Err(_) => {
-                            eprintln!("timing sender shut down => stopping emulator");
-                            break 'main
-                        }
-                    }
-                }
-                time += 16742; // (59.73 Hz)^-1 in µs
-            }
-        }
+        let mut package = Package::new(
+            Path::new("resources/roms/null.gb"),
+            Some(Path::new("resources/bootrom/gb_bios.bin")),
+            fb,
+            audio_backend,
+        )
+        .unwrap();
+        package.run(time_passed, control);
     });
 }
 
@@ -98,7 +69,7 @@ fn build_ui(app: &Application) {
                 buf[offs] = PALLETTE[fb[offs] as usize];
             }
         }
-        
+
         // scaled surface to screen
         let s = std::cmp::min(w / LCD_WIDTH as i32, h / LCD_HEIGHT as i32);
         cr.scale(s as f64, s as f64);

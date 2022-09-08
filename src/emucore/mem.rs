@@ -15,7 +15,7 @@ pub struct GBMemory {
     wram: Box<[u8; 8192]>,
     vram: Box<[u8; 8192]>,
     oam: Box<[u8; 160]>,
-    bootrom: Option<&'static [u8; 256]>,
+    bootrom: Option<Box<[u8; 256]>>,
     cartridge: Cartridge,
     control_registers: ControlRegisters,
     sound_controller: Rc<RefCell<SoundController>>,
@@ -34,7 +34,7 @@ impl GBMemory {
         }
     }
 
-    pub fn with_bootrom(bootrom: &'static [u8; 256], cartridge: Cartridge, sound: Rc<RefCell<SoundController>>) -> Self {
+    pub fn with_bootrom(bootrom: Box<[u8; 256]>, cartridge: Cartridge, sound: Rc<RefCell<SoundController>>) -> Self {
         let mut mem = GBMemory::new(cartridge, sound);
         mem.bootrom = Some(bootrom);
         mem
