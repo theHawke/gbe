@@ -37,11 +37,14 @@ impl<M: MemoryIfc, I: Interruptible> Timer<M, I> {
             if self.tick_count & mask == 0 {
                 let (new_val, of) = mem_cr.timer_ctr.overflowing_add(1);
                 mem_cr.timer_ctr = if of {
-                    self.cpu.borrow_mut().raise_interrupt(InterruptType::Timer);
                     mem_cr.timer_mod
                 } else {
                     new_val
                 };
+                if of {
+                    std::mem::drop(mem_cr);
+                    self.cpu.borrow_mut().raise_interrupt(InterruptType::Timer);
+                }
             }
         }
     }

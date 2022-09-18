@@ -48,10 +48,10 @@ fn test_bootrom() -> Result<(), image::ImageError> {
     let print_instr = false;
 
     while cpu.borrow().running() {
-        let frame = ppu.tick();
+        ppu.tick();
         sound_controller.borrow_mut().tick();
         cpu.borrow_mut().tick();
-        if frame {
+        if ppu.frame_start() {
             let file_name = format!("test_output/bootrom_test/frame{}.png", frame_count);
             let output_file = Path::new(file_name.as_str());
             let data = render(&*ppu.get_frame(), TEST_PALLETTE);

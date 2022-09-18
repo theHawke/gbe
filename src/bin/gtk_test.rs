@@ -1,9 +1,12 @@
+use gbe::app::{
+    audio_backend::CpalBackend,
+    package::{Command, Package},
+    timing::*,
+};
+use gbe::emucore::ppu::{FrameBuffer, LCD_HEIGHT, LCD_PIXELS, LCD_WIDTH};
+
 use std::path::Path;
 use std::sync::{atomic::AtomicU8, mpsc, Arc, Mutex};
-
-use gbe::app::audio_backend::CpalBackend;
-use gbe::emucore::package::{EmulatorControl, Package};
-use gbe::emucore::ppu::{FrameBuffer, LCD_HEIGHT, LCD_PIXELS, LCD_WIDTH};
 
 use gtk::cairo::{Filter, FontFace, FontSlant, FontWeight, Format, ImageSurface};
 use gtk::{prelude::*, Application, ApplicationWindow, DrawingArea};
@@ -23,9 +26,12 @@ fn main() {
     app.run();
 }
 
-fn start_emulator(fb: Arc<Mutex<FrameBuffer>>, time_passed: mpsc::Receiver<i64>) {
+fn setup_emulator(
+    fb: Arc<Mutex<FrameBuffer>>,
+    timing: TimingReceiver,
+    commands: mpsc::Receiver<Command>,
+) {
     std::thread::spawn(move || {
-        let control = Arc::new(Mutex::new(EmulatorControl::Run));
         let audio_backend = Box::new(CpalBackend::new());
         let buttons = Arc::new(AtomicU8::new(0xFF));
         let mut package = Package::new(
@@ -36,7 +42,7 @@ fn start_emulator(fb: Arc<Mutex<FrameBuffer>>, time_passed: mpsc::Receiver<i64>)
             buttons,
         )
         .unwrap();
-        package.run(time_passed, control);
+        package.run(timing, commands);
     });
 }
 
@@ -98,20 +104,16 @@ fn build_ui(app: &Application) {
         cr.show_text(&fps_text).unwrap();
     });
 
-    let (tx, rx) = mpsc::channel();
+    let (time_tx, time_rx) = make_timing(i64::MIN);
 
     screen.add_tick_callback(move |da, fc| {
         da.queue_draw();
-        match tx.send(fc.frame_time()) {
-            Ok(()) => Continue(true),
-            Err(_) => {
-                eprintln!("frame time send failed, emulator down?");
-                Continue(false)
-            }
-        }
+        Continue(time_tx.update(fc.frame_time()))
     });
 
-    start_emulator(fb, rx);
+    let (command_tx, command_rx) = mpsc::channel();
+
+    setup_emulator(fb, time_rx, command_rx);
 
     // Create a window
     let window = ApplicationWindow::builder()
@@ -122,4 +124,8 @@ fn build_ui(app: &Application) {
 
     // Present window
     window.present();
+
+    // set emulator running
+    command_tx.send(Command::Run { from_time: screen.frame_clock().unwrap().frame_time() }).unwrap();
+    std::mem::forget(command_tx); // TODO store in application state to prevent queue closing
 }

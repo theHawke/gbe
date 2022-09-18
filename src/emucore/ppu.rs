@@ -377,7 +377,7 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
         stat & 0x40 != 0 && stat & 0x04 != 0 || mode != 3 && stat & 0x08 << mode != 0
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self) {
         // stat updates
         if self.current_dot_on_line == 0 {
             self.cr_mut().ly = self.current_line;
@@ -428,10 +428,12 @@ impl<M: MemoryIfc, C: Interruptible> Ppu<M, C> {
             self.current_line += 1;
             if self.current_line == LINES_PER_FRAME as u8 {
                 self.current_line = 0;
-                return true;
             }
         }
-        false
+    }
+
+    pub fn frame_start(&self) -> bool {
+        self.current_line == 0 && self.current_dot_on_line == 0
     }
 
     pub fn get_frame<'a>(&'a self) -> impl Deref<Target = FrameBuffer> + 'a {
